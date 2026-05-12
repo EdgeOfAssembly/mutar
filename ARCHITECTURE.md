@@ -2,7 +2,7 @@
 
 ## Overview
 
-`star` is a single-translation-unit C++23 implementation (~1700 LOC across
+`star` is a single-translation-unit C++23 implementation (~3990 LOC across
 `star.hpp` + `star.cpp`). It is structured in clean layers with no external
 dependencies beyond POSIX and the C++23 standard library.
 
