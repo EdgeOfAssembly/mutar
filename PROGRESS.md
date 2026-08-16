@@ -183,3 +183,81 @@ mandoc -T lint mutar.1             → exit 0
 
 - Phase H freeze v0.2.0
 - Multi-volume mid-file; full `--pax-option`; SELinux out of scope
+
+---
+
+## v0.2.0 freeze — GOAL_NEXT phases A–H — 2026-08-16
+
+**Status:** complete. Tag **`v0.2.0`**.  
+**Identity:** µtar / `mutar` · ~99% GNU tar 1.35 · **SELinux unsupported**.
+
+### Commits (GOAL_NEXT E–H + prior A–D on main)
+
+| SHA | Subject |
+|-----|---------|
+| `85a84d1` | FIXUP v1 Honest status tables Phase A GOAL_NEXT |
+| `ae74aa2` | FEATURE v1 --pax-option delete=KEYWORD support |
+| `863dff3` | FEATURE v1 Multi-volume tape-length volno and info-script |
+| `d2d22c4` | FEATURE v1 xattrs and ACLs store restore via PAX |
+| `e60c411` | FIXUP v1 GOAL_NEXT A-D progress proof |
+| `97c6df5` | FEATURE v1 Phase E restrict backup quoting polish |
+| `e3dca63` | FEATURE v1 Phase F seek docs and micro-benchmarks |
+| `df5a404` | FEATURE v1 Phase G formal harness and mutar.1 |
+| *(this)* | FEATURE v1 Campaign freeze Phase H v0.2.0 |
+
+### Phases delivered
+
+| Phase | Scope | Result |
+|-------|--------|--------|
+| A | Honest tables + path hygiene | COMPAT/AGENTS/README aligned |
+| B | `--pax-option` | `delete=KEYWORD` on write; other keywords ignored |
+| C | Multi-volume | Between-member create/extract, `-L`, `--volno-file`, `--info-script`; **mid-file still partial** |
+| D | xattrs/ACLs | SCHILY PAX store/restore + include/exclude; **SELinux unsupported** |
+| E | Polish | `--restrict`, `--backup` CONTROL, `--quoting-style`, `--check-device`, snapshot V2 |
+| F | Seek/perf | Materialize-then-seek docs; `bench_index_seek.sh` numbers; no false speed claims |
+| G | Formal + man | CBMC path sanitize VERIFIED; `mutar.1` |
+| H | Freeze | Version 0.2.0, tag, push, memory dual-write |
+
+### Test matrix (Phase H freeze gate)
+
+Sanitizer Debug build: `-fsanitize=address,undefined -fno-sanitize-recover=all`.
+
+```
+cmake --build build -j$(nproc)                 → exit 0
+ctest --test-dir build --output-on-failure     → 10/10 passed, 0 failed
+make test                                      → 10/10 passed, 0 failed
+make verify                                    → test + path_agreement_test (18/18)
+                                                 + CBMC VERIFICATION SUCCESSFUL
+
+bash tests/test_phase_e.sh build/mutar         → PASS=14 FAIL=0
+bash tests/test_pax_option.sh build/mutar      → 9 passed, 0 failed
+bash tests/test_multi_volume.sh build/mutar    → 5 passed, 0 failed
+bash tests/test_xattrs_acls.sh build/mutar     → 12 passed, 0 failed
+bash tests/test_index_seek.sh build/mutar      → PASS=14 FAIL=0
+bash tests/test_seekable_compress.sh build/mutar → PASS=11 FAIL=0
+```
+
+CTest targets: `mutar_tests`, `mutar_pr172_tests`, `mutar_index_seek_tests`,
+`mutar_seekable_compress_tests`, `mutar_pax_option_tests`, `mutar_multi_volume_tests`,
+`mutar_xattrs_acls_tests`, `mutar_phase_e_tests`, `mutar_bench_smoke`, `mutar_boundary_tests`.
+
+### Formal evidence
+
+| Item | Result |
+|------|--------|
+| `formal/path_agreement_test` | 18/18 fixtures PASS |
+| CBMC `harness` (`--unwind 6 --bounds-check`) | VERIFICATION SUCCESSFUL |
+| CBMC `harness_fixtures` (`--unwind 16 --bounds-check --pointer-check`) | VERIFICATION SUCCESSFUL |
+| CBMC version | 6.10.0 (`~/.local/bin/cbmc`) |
+
+### Residual (do not claim done)
+
+- Multi-volume **mid-file** stream split
+- `--pax-option` keywords beyond `delete=`
+- SELinux (out of scope forever without hardware)
+- Frame-level compressed seek (still materialize-then-seek)
+
+### Tag
+
+`v0.2.0` — GOAL_NEXT A–H freeze: pax-option delete=, multi-vol between-member,
+xattrs/ACLs, Phase E polish, benches, formal path sanitize + mutar.1.

@@ -1,11 +1,12 @@
 # µtar (mutar) — GOAL_NEXT (post-v0.1.0)
 
-**Status:** phases A–E complete; **stop for user OK before F–H**  
+**Status:** phases A–H **complete** — freeze **v0.2.0**  
 **Date:** 2026-08-16  
 **Owner:** EdgeOfAssembly  
 **Local tree:** `/tmp/mutar`  
 **Remote:** https://github.com/EdgeOfAssembly/mutar  
-**Baseline:** tag `v0.1.0` (campaign `GOAL.md` phases 0–7 complete)
+**Baseline:** tag `v0.1.0` (campaign `GOAL.md` phases 0–7 complete)  
+**Freeze tag:** `v0.2.0`
 
 This file is the **single source of truth for new work** after the rename/index/seek freeze.
 Do **not** re-run `GOAL.md` phases 0–7. Load this file first, then spawn subagents as specified.
@@ -216,13 +217,23 @@ Report after each phase: changes, commands+exit codes, residual risks.
 
 - [x] Phase A: G22 path hygiene + G5 honest status tables (COMPAT/AGENTS/README)
 - [x] G1 `--pax-option` tested (`delete=KEYWORD`)
-- [x] G2–G4 multi-volume between-member + scripts + volno (mid-file still partial)
+- [x] G2–G4 multi-volume between-member + scripts + volno (**mid-file multi-vol still partial**)
 - [x] G6–G8 xattrs/ACLs round-trip (when libs present)
 - [x] SELinux still unsupported in help/docs (G9; no-op + warning only)
-- [x] Sanitizer ctest + harnesses green (A–D gate 2026-08-16)
-- [x] `PROGRESS.md` proof block for GOAL_NEXT A–D
-- [ ] Tag `v0.2.0` (or `v0.1.1` if only polish) pushed — after E–H
-- [ ] Dual-write memory updated — after freeze
+- [x] Phase E: G10–G15 polish (`--restrict`, `--backup`, `--quoting-style`, `--check-device`, snapshot V2)
+- [x] Phase F: G16–G18 seek docs + micro-benchmarks (materialize-then-seek honest)
+- [x] Phase G: G19–G20 formal path sanitize (`make verify` / CBMC) + `mutar.1`
+- [x] Sanitizer ctest + harnesses green (A–H freeze gate 2026-08-16)
+- [x] `PROGRESS.md` proof block for GOAL_NEXT A–H / v0.2.0 freeze
+- [x] Tag `v0.2.0` pushed
+- [x] Dual-write memory updated (pmem + `~/.grok/memory/projects/mutar.md`)
+
+### Residual after v0.2.0 (honest)
+
+- Multi-volume **mid-file** stream split still partial (between-member works)
+- `--pax-option` keywords beyond `delete=` still ignored
+- SELinux **unsupported** forever without hardware
+- Compressed seek remains materialize-then-seek (not frame-level)
 
 ---
 

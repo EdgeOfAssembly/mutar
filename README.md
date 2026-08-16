@@ -18,15 +18,21 @@ Performance claims require published benchmarks; see `PROGRESS.md` Phase F.
 
 ## Status
 
-**v0.1.0 freeze (2026-08-16).** Campaign `GOAL.md` phases 0–7 complete.
+**v0.2.0 freeze (2026-08-16).** Campaign `GOAL_NEXT.md` phases A–H complete
+(on top of `GOAL.md` phases 0–7 / v0.1.0).
 
 | Area | Status |
 |------|--------|
 | Identity | µtar / `mutar` / [EdgeOfAssembly/mutar](https://github.com/EdgeOfAssembly/mutar) |
 | GNU tar interop | Formats + common CLI; **~99%** goal |
-| SELinux | Unsupported |
+| SELinux | **Unsupported** (no-op + warning) |
 | Sidecar index | `--write-index` / `--mutar-index` |
 | Seek | Uncompressed direct `lseek`; compressed **materialize-then-seek** (`--seekable`) — not frame-level |
+| PAX options | `--pax-option delete=KEYWORD` on write |
+| Multi-volume | Between-member `-M -L` + volno/info-script; **mid-file split partial** |
+| xattrs / ACLs | SCHILY PAX store/restore when host libs present |
+| Formal | `make verify` — path sanitize fixtures + CBMC |
+| Man page | `mutar.1` |
 
 Proof log: `PROGRESS.md`. Option audit: `COMPATIBILITY_PROGRESS.md`.
 

@@ -5415,7 +5415,7 @@ static void print_usage(const char* prog) {
 }
 
 static void print_version() {
-    print("mutar (µtar) 0.1.0 — C++23 GNU tar-compatible archiver\n"
+    print("mutar (µtar) 0.2.0 — C++23 GNU tar-compatible archiver\n"
                "Not Jörg Schilling's star (Schily tools).\n"
                "Goal: ~99% GNU tar 1.35 compatibility (SELinux not supported).\n"
                "Formats: v7, oldgnu, gnu, ustar, pax/posix\n"

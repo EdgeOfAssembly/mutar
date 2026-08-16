@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.20)
 # Enable C language alongside CXX so that CheckSymbolExists can compile C test
 # files when probing C library symbols like listxattr.
-project(mutar VERSION 0.1.0 LANGUAGES CXX C)
+project(mutar VERSION 0.2.0 LANGUAGES CXX C)
 
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
