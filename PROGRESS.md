@@ -21,7 +21,7 @@
 | `8636d8b` | FEATURE v1 Sidecar index MUTAR.INDEX.V1 and seek extract |
 | `9387b26` | FEATURE v1 Seekable compression and materialize-then-seek |
 | `c054b0a` | FIXUP v1 Document Phase 6 seekable compression |
-| *(this)* | FEATURE v1 Campaign freeze Phase 7 |
+| `380e38c` | FEATURE v1 Campaign freeze Phase 7 |
 
 ### Features delivered
 
