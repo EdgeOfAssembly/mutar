@@ -1,6 +1,6 @@
 # µtar (mutar) — GOAL_NEXT (post-v0.1.0)
 
-**Status:** ready to execute  
+**Status:** phases A–D complete; **stop for user OK before E–H**  
 **Date:** 2026-08-16  
 **Owner:** EdgeOfAssembly  
 **Local tree:** `/tmp/mutar`  
@@ -216,13 +216,13 @@ Report after each phase: changes, commands+exit codes, residual risks.
 
 - [x] Phase A: G22 path hygiene + G5 honest status tables (COMPAT/AGENTS/README)
 - [x] G1 `--pax-option` tested (`delete=KEYWORD`)
-- [x] G2–G4 multi-volume between-member + scripts + volno (mid-file still partial)  
-- [ ] G6–G8 xattrs/ACLs round-trip (when libs present)  
-- [ ] SELinux still unsupported in help/docs  
-- [ ] Sanitizer ctest + harnesses green  
-- [ ] `PROGRESS.md` proof block for v0.2.0  
-- [ ] Tag `v0.2.0` (or `v0.1.1` if only polish) pushed  
-- [ ] Dual-write memory updated  
+- [x] G2–G4 multi-volume between-member + scripts + volno (mid-file still partial)
+- [x] G6–G8 xattrs/ACLs round-trip (when libs present)
+- [x] SELinux still unsupported in help/docs (G9; no-op + warning only)
+- [x] Sanitizer ctest + harnesses green (A–D gate 2026-08-16)
+- [x] `PROGRESS.md` proof block for GOAL_NEXT A–D
+- [ ] Tag `v0.2.0` (or `v0.1.1` if only polish) pushed — after E–H
+- [ ] Dual-write memory updated — after freeze
 
 ---
 
