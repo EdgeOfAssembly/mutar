@@ -423,8 +423,10 @@ static void test_sanitize_path_traversal() {
     char outdir[] = "/tmp/mutar_bt_trav_XXXXXX";
     assert(::mkdtemp(outdir) != nullptr);
 
-    // mutar should extract, but NOT to ../../evil.txt outside outdir
-    run_mutar({"-xf", archive, "-C", outdir});
+    // mutar should extract safely (sanitized path inside outdir), not escape.
+    // system()/pclose wait status: 0 means success.
+    int rc = run_mutar({"-xf", archive, "-C", outdir});
+    CHECK_EQ(rc, 0);
 
     // Check: the evil file must NOT have appeared in parent of outdir
     std::string parent = std::string(outdir);
@@ -432,6 +434,10 @@ static void test_sanitize_path_traversal() {
     if (slash != std::string::npos) parent = parent.substr(0, slash);
     std::string evil = parent + "/evil.txt";
     CHECK_EQ(::access(evil.c_str(), F_OK), -1); // must NOT exist
+
+    // Sanitized extract should land inside outdir as evil.txt (not outside)
+    std::string inside = std::string(outdir) + "/evil.txt";
+    CHECK_EQ(::access(inside.c_str(), F_OK), 0);
 
     // Cleanup
     ::unlink(archive.c_str());

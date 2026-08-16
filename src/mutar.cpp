@@ -917,13 +917,19 @@ static bool xattr_key_matches(std::string_view key, std::string_view pattern) {
     return ::fnmatch(std::string(pattern).c_str(), std::string(key).c_str(), 0) == 0;
 }
 
+/// Privileged xattr namespaces must not be stored or restored from archives
+/// (privilege escalation / policy bypass). user.* is the safe default set.
+static bool xattr_namespace_privileged(std::string_view key) {
+    return key.starts_with("security.")
+        || key.starts_with("trusted.")
+        || key.starts_with("system.");
+}
+
 /// Whether to store this xattr key under --xattrs (include/exclude + hard skips).
 static bool xattr_key_wanted(const Config& cfg, std::string_view key) {
-    // Never store SELinux context (unsupported by project policy).
-    if (key == "security.selinux") return false;
-    // POSIX ACL xattrs are handled by --acls → SCHILY.acl.*; skip raw forms.
-    if (key == "system.posix_acl_access" || key == "system.posix_acl_default")
-        return false;
+    // Never store privileged namespaces (security.*, trusted.*, system.*).
+    // POSIX ACLs are handled by --acls → SCHILY.acl.*; SELinux unsupported.
+    if (xattr_namespace_privileged(key)) return false;
     if (!cfg.xattrs_exclude.empty()) {
         for (const auto& pat : cfg.xattrs_exclude) {
             if (xattr_key_matches(key, pat)) return false;
@@ -972,9 +978,9 @@ static void restore_xattrs(const Entry& e, const std::string& path, const Config
     for (const auto& [k, v] : e.pax_attrs) {
         if (!k.starts_with(prefix)) continue;
         std::string name = xattr_decode_keyword(std::string_view(k).substr(prefix.size()));
-        if (name == "security.selinux") continue;
-        if (name == "system.posix_acl_access" || name == "system.posix_acl_default")
-            continue;
+        // Restore only non-privileged namespaces (typically user.*).
+        // security.*, trusted.*, and system.* are never applied from archives.
+        if (xattr_namespace_privileged(name)) continue;
         if (::lsetxattr(path.c_str(), name.c_str(), v.data(), v.size(), 0) < 0) {
             print(stderr, "mutar: {}: setxattr({}): {}\n",
                   path, name, std::strerror(errno));
@@ -1146,18 +1152,15 @@ static void mutar_warn(const Config& cfg, std::string_view category, std::string
 // ── Multi-volume helpers ──────────────────────────────────────────────────────
 
 // Generate the archive filename for volume N (1-based).
-// If base contains "%d", substitute the volume number.
+// If base contains "%d", substitute the first occurrence with the volume number
+// (GNU tar convention). Never pass the user path to printf-family as a format.
 // Otherwise volume 1 = base, volume N = base.N
 static std::string make_volume_name(const std::string& base, int vol_num) {
-    if (base.find("%d") != std::string::npos) {
-        char buf[PATH_MAX];
-        // Intentionally using user-supplied format string (GNU tar %d convention)
-        // NOLINTNEXTLINE(cert-err33-c)
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wformat-nonliteral"
-        std::snprintf(buf, sizeof(buf), base.c_str(), vol_num);
-#pragma GCC diagnostic pop
-        return buf;
+    auto pos = base.find("%d");
+    if (pos != std::string::npos) {
+        std::string out = base;
+        out.replace(pos, 2, std::to_string(vol_num));
+        return out;
     }
     if (vol_num == 1) return base;
     return base + "." + std::to_string(vol_num);
@@ -1657,44 +1660,47 @@ public:
 
     void apply_pax_attrs(Entry& e) {
         for (auto& [k, v] : e.pax_attrs) {
-            if (k == "path")           e.name = v;
-            else if (k == "linkpath")  e.linkname = v;
-            else if (k == "uname")     e.uname = v;
-            else if (k == "gname")     e.gname = v;
-            else if (k == "size")      e.size = std::stoll(v);
-            else if (k == "mtime") {
-                double t = std::stod(v);
-                e.mtime = static_cast<std::int64_t>(t);
-                e.mtime_nsec = static_cast<long>((t - e.mtime) * 1e9);
-            }
-            else if (k == "atime")     e.atime = static_cast<std::int64_t>(std::stod(v));
-            else if (k == "uid")       e.uid   = static_cast<unsigned>(std::stoul(v));
-            else if (k == "gid")       e.gid   = static_cast<unsigned>(std::stoul(v));
-            else if (k == "GNU.sparse.realsize") {
-                e.is_sparse = true;
-                e.real_size = std::stoll(v);
-            }
-            else if (k == "GNU.sparse.name")     e.name = v;
-            else if (k == "GNU.sparse.map") {
-                // Parse "offset,length,offset,length,..." into sparse_map
-                e.sparse_map.clear();
-                e.is_sparse = true;
-                std::istringstream ss(v);
-                std::string tok;
-                try {
+            try {
+                if (k == "path")           e.name = v;
+                else if (k == "linkpath")  e.linkname = v;
+                else if (k == "uname")     e.uname = v;
+                else if (k == "gname")     e.gname = v;
+                else if (k == "size")      e.size = std::stoll(v);
+                else if (k == "mtime") {
+                    double t = std::stod(v);
+                    e.mtime = static_cast<std::int64_t>(t);
+                    e.mtime_nsec = static_cast<long>((t - e.mtime) * 1e9);
+                }
+                else if (k == "atime")     e.atime = static_cast<std::int64_t>(std::stod(v));
+                else if (k == "uid")       e.uid   = static_cast<unsigned>(std::stoul(v));
+                else if (k == "gid")       e.gid   = static_cast<unsigned>(std::stoul(v));
+                else if (k == "GNU.sparse.realsize") {
+                    e.is_sparse = true;
+                    e.real_size = std::stoll(v);
+                }
+                else if (k == "GNU.sparse.name")     e.name = v;
+                else if (k == "GNU.sparse.map") {
+                    // Parse "offset,length,offset,length,..." into sparse_map
+                    e.sparse_map.clear();
+                    e.is_sparse = true;
+                    std::istringstream ss(v);
+                    std::string tok;
                     while (std::getline(ss, tok, ',')) {
                         std::int64_t off = std::stoll(tok);
                         if (!std::getline(ss, tok, ',')) break;
                         std::int64_t nb  = std::stoll(tok);
                         e.sparse_map.push_back({off, nb});
                     }
-                } catch (...) {
-                    // Malformed sparse map — discard partial parse
+                    e.asize = 0;
+                    for (auto& sm : e.sparse_map) e.asize += sm.numbytes;
+                }
+            } catch (const std::exception&) {
+                // Malformed numeric / sparse PAX field — skip this key only.
+                if (k == "GNU.sparse.map" || k == "GNU.sparse.realsize") {
                     e.sparse_map.clear();
                     e.is_sparse = false;
                 }
-                e.asize = 0;
-                for (auto& sm : e.sparse_map) e.asize += sm.numbytes;
+                print(stderr, "mutar: warning: ignoring malformed pax field '{}'\n", k);
             }
         }
         e.asize = e.size; // may be overridden by sparse
@@ -2334,6 +2340,75 @@ static std::string sanitize_path(std::string_view path, bool absolute_names) {
     }
     return result;
 }
+
+/// Open a regular file for extract write without following symlinks.
+/// Prevents symlink-mediated zip-slip: archive places a symlink, then a
+/// regular member with the same name that would otherwise open(2) through
+/// the link and overwrite an arbitrary target.
+///
+/// Policy: if outpath is a symlink, unlink it first (unless --keep-old-files).
+/// Prefer O_NOFOLLOW; on ELOOP after a race, unlink and retry with O_EXCL.
+static int open_extract_regular(const std::string& outpath, const Config& cfg) {
+#ifdef O_NOFOLLOW
+    constexpr int k_nofollow = O_NOFOLLOW;
+#else
+    constexpr int k_nofollow = 0;
+#endif
+
+    struct stat st{};
+    if (::lstat(outpath.c_str(), &st) == 0 && S_ISLNK(st.st_mode)) {
+        if (cfg.keep_old_files) {
+            errno = EEXIST;
+            return -1;
+        }
+        if (::unlink(outpath.c_str()) < 0 && errno != ENOENT)
+            return -1;
+    }
+
+    int flags = O_WRONLY | O_CREAT | O_TRUNC | k_nofollow;
+    int fd = ::open(outpath.c_str(), flags, 0666);
+    if (fd >= 0) return fd;
+
+    // Symlink race or O_NOFOLLOW rejection: unlink link and recreate exclusively.
+    if (errno == ELOOP || errno == EEXIST) {
+        if (cfg.keep_old_files) return -1;
+        if (::lstat(outpath.c_str(), &st) == 0 && S_ISLNK(st.st_mode)) {
+            if (::unlink(outpath.c_str()) < 0 && errno != ENOENT)
+                return -1;
+            flags = O_WRONLY | O_CREAT | O_EXCL | k_nofollow;
+            fd = ::open(outpath.c_str(), flags, 0666);
+            if (fd >= 0) return fd;
+            // Last resort after unlink: truncate create without following links.
+            flags = O_WRONLY | O_CREAT | O_TRUNC | k_nofollow;
+            return ::open(outpath.c_str(), flags, 0666);
+        }
+    }
+    return -1;
+}
+
+/// RAII unlink of a temp path (materialized seek view).
+struct TempPathUnlink {
+    std::string path;
+    explicit TempPathUnlink(std::string p = {}) : path(std::move(p)) {}
+    TempPathUnlink(const TempPathUnlink&) = delete;
+    TempPathUnlink& operator=(const TempPathUnlink&) = delete;
+    TempPathUnlink(TempPathUnlink&& o) noexcept : path(std::move(o.path)) { o.path.clear(); }
+    TempPathUnlink& operator=(TempPathUnlink&& o) noexcept {
+        if (this != &o) {
+            reset();
+            path = std::move(o.path);
+            o.path.clear();
+        }
+        return *this;
+    }
+    void reset() {
+        if (!path.empty()) {
+            ::unlink(path.c_str());
+            path.clear();
+        }
+    }
+    ~TempPathUnlink() { reset(); }
+};
 
 // Normalize an archive member name: strip leading ./ (mirrors walk_dir normalization).
 // Used when building the 'want' set from user-supplied names so that
@@ -3519,8 +3594,8 @@ static int op_extract(const Config& cfg) {
         return EXIT_FAILURE;
     }
     ArchiveStream s = std::move(*res);
-    std::string materialize_temp;
-    bool unlink_materialize = false;
+    // RAII: any early return after materialize unlinks the temp automatically.
+    TempPathUnlink materialize_guard;
 
     if (!cfg.index_file.empty()) {
         g_index_fp = std::fopen(cfg.index_file.c_str(), "w");
@@ -3557,6 +3632,7 @@ static int op_extract(const Config& cfg) {
     const bool want_seek =
         have_index && !want.empty() && !s.is_seekable();
     if (want_seek) {
+        std::string materialize_temp;
         auto mat = ArchiveStream::materialize_seekable(s, materialize_temp);
         if (!mat) {
             print(stderr, "mutar: cannot materialize seekable view: {}\n",
@@ -3564,10 +3640,10 @@ static int op_extract(const Config& cfg) {
             return EXIT_FAILURE;
         }
         s = std::move(*mat);
-        unlink_materialize = true;
+        materialize_guard = TempPathUnlink(std::move(materialize_temp));
         if (std::getenv("MUTAR_DEBUG_SEEK"))
             print(stderr, "mutar: materialized compressed archive to {} for seek\n",
-                  materialize_temp);
+                  materialize_guard.path);
     }
 
     ArchiveReader reader(s, cfg.blocking_factor, cfg.ignore_zeros);
@@ -3575,8 +3651,6 @@ static int op_extract(const Config& cfg) {
     if (!cfg.directory.empty()) {
         if (::chdir(cfg.directory.c_str()) < 0) {
             print(stderr, "mutar: -C {}: {}\n", cfg.directory, std::strerror(errno));
-            if (unlink_materialize && !materialize_temp.empty())
-                ::unlink(materialize_temp.c_str());
             return EXIT_FAILURE;
         }
     }
@@ -3977,7 +4051,9 @@ static int op_extract(const Config& cfg) {
                     ::rename(outpath.c_str(), bak.c_str());
             }
 
-            int fd = ::open(outpath.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0666);
+            // O_NOFOLLOW + unlink-if-symlink: never write through a symlink
+            // (symlink-mediated zip-slip when archive has link then regular).
+            int fd = open_extract_regular(outpath, cfg);
             if (fd < 0) {
                 print(stderr, "mutar: {}: {}\n", outpath, std::strerror(errno));
                 reader.skip_entry(e);
@@ -4056,9 +4132,7 @@ static int op_extract(const Config& cfg) {
 
     if (g_index_fp) { std::fclose(g_index_fp); g_index_fp = nullptr; }
 
-    if (unlink_materialize && !materialize_temp.empty())
-        ::unlink(materialize_temp.c_str());
-
+    // materialize_guard destructor unlinks temp if armed
     return exit_code;
 }
 

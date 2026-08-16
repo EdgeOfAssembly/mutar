@@ -131,7 +131,7 @@ Legend:
 | `--atime-preserve[=METHOD]` | ✅ | |
 | `--utc` | ✅ | |
 | `--full-time` | 🔧 | Nanosecond timestamps now shown in `--list` |
-| `--xattrs` / `--no-xattrs` | ✅ | When `MUTAR_HAVE_XATTR`: create stores via `llistxattr`/`lgetxattr` as PAX `SCHILY.xattr.*` (raw values, GNU interop); extract restores with `lsetxattr`. Never stores `security.selinux`. Skips `system.posix_acl_*` (use `--acls`). |
+| `--xattrs` / `--no-xattrs` | ✅ | When `MUTAR_HAVE_XATTR`: create stores via `llistxattr`/`lgetxattr` as PAX `SCHILY.xattr.*` (raw values, GNU interop); extract restores with `lsetxattr`. Create+restore skip privileged namespaces `security.*`, `trusted.*`, `system.*` (ACLs via `--acls`). |
 | `--xattrs-include=MASK` / `--xattrs-exclude=MASK` | ✅ | fnmatch filters applied on store; include empty ⇒ all non-skipped keys; exclude always applied. |
 | `--acls` / `--no-acls` | ✅ | When `MUTAR_HAVE_ACL`: create stores non-trivial access ACL + default ACL (dirs) as `SCHILY.acl.access` / `SCHILY.acl.default` text; extract `acl_from_text` + `acl_set_file`. |
 | `--selinux` / `--no-selinux` | ❌ Unsupported | Project policy: no SELinux test hardware. Options accepted as no-ops with warning. Never stored even with `--xattrs`. |
@@ -466,17 +466,25 @@ When built with `MUTAR_HAVE_XATTR` / `MUTAR_HAVE_ACL` (CMake detection):
 
 - **Create (`--xattrs`)**: `llistxattr` + `lgetxattr`; emit PAX records
   `SCHILY.xattr.<key>=<raw-value>` (GNU tar interop; keyword percent-encodes
-  `=` / `%` only). Always skips `security.selinux` and `system.posix_acl_*`.
+  `=` / `%` only). Skips privileged namespaces `security.*`, `trusted.*`,
+  `system.*` (POSIX ACLs via `--acls` → `SCHILY.acl.*`).
   `--xattrs-include` / `--xattrs-exclude` use `fnmatch`.
 - **Create (`--acls`)**: `acl_get_file` ACCESS (+ DEFAULT for dirs);
   non-trivial access ACLs and default ACLs stored as `SCHILY.acl.access` /
   `SCHILY.acl.default` text (`acl_to_text`).
 - **Extract**: with matching flags, `lsetxattr` / `acl_from_text`+`acl_set_file`
-  after the file/dir is created. Without the flag, SCHILY records are ignored.
+  after the file/dir is created. Restore also skips privileged xattr namespaces.
+  Without the flag, SCHILY records are ignored.
 - **SELinux (G9)**: still unsupported; `--selinux` no-op + warning; never stored.
+- **Extract open safety**: regular-file extract uses `O_NOFOLLOW` and unlinks a
+  pre-existing symlink at the outpath before write (symlink-mediated zip-slip).
+  PAX numeric fields (`stoll`/`stod`) are try/catch-guarded. Materialize temp
+  uses RAII unlink. `make_volume_name` substitutes the first `%d` without
+  printf format strings.
 
 Tests: `tests/test_xattrs_acls.sh` (CTest `mutar_xattrs_acls_tests`); skips when
-libs/tools/FS lack support.
+libs/tools/FS lack support. Extract safety: `tests/test_extract_safety.sh`
+(CTest `mutar_extract_safety_tests`).
 
 ### 5. Remote tape / rmt (`--rsh-command` / `--rmt-command`)
 

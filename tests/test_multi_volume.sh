@@ -97,13 +97,14 @@ echo "[T-MVOL-VOLNO]"
   final=$(tr -d '[:space:]' < "$VOLNO" 2>/dev/null || echo '')
   nvol=$(find "$D" -maxdepth 1 \( -name 'a.tar' -o -name 'a.tar.*' \) -type f | wc -l)
 
+  # Require multi-volume rotation so volno-file is actually exercised (not false-green).
   if [ "$rc" -ne 0 ]; then
     fail "T-MVOL-VOLNO" "create failed rc=$rc err=$(head -c 300 "$D/err.txt")"
+  elif [ "$nvol" -lt 2 ]; then
+    fail "T-MVOL-VOLNO" "expected >=2 volumes to exercise volno, got $nvol"
   elif ! [[ "$final" =~ ^[0-9]+$ ]]; then
     fail "T-MVOL-VOLNO" "volno-file not numeric: '$final'"
-  elif [ "$final" -lt 1 ]; then
-    fail "T-MVOL-VOLNO" "volno-file invalid: $final"
-  elif [ "$nvol" -ge 2 ] && [ "$final" -lt 2 ]; then
+  elif [ "$final" -lt 2 ]; then
     fail "T-MVOL-VOLNO" "had $nvol volumes but volno-file=$final (expected >=2)"
   else
     pass "T-MVOL-VOLNO: volno-file=$final after $nvol volumes"

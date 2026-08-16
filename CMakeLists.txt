@@ -214,6 +214,13 @@ add_test(
   WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
 )
 
+# Extract safety: symlink-mediated zip-slip, volume name format hygiene
+add_test(
+  NAME mutar_extract_safety_tests
+  COMMAND bash ${CMAKE_SOURCE_DIR}/tests/test_extract_safety.sh $<TARGET_FILE:mutar>
+  WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+)
+
 # xattrs + ACLs store/restore via SCHILY PAX (GOAL_NEXT Phase D / G6–G8)
 add_test(
   NAME mutar_xattrs_acls_tests
