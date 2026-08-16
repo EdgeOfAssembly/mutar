@@ -419,15 +419,25 @@ Optional `MUTAR.INDEX.V1` sidecar (`ARCHIVE.mutaridx` or `--mutar-index=PATH`):
 - **Extract:** selective extract on a seekable uncompressed stream seeks to each
   member via `ArchiveReader::seek_to_byte` (`MUTAR_DEBUG_SEEK=1` logs seeks).
 - **Compat:** archive bytes unchanged — GNU tar ignores the sidecar.
-- **Limit (pre-Phase 6):** solid compressed streams are pipes (not seekable in place).
+- **Uncompressed path:** if the archive fd is already seekable (plain `.tar`),
+  extract **never** materializes — only `lseek` + index offsets.
 
-## Seekable compression (Phase 6)
+## Seekable compression (Phase 6 / Phase F G16)
 
 `--seekable` (implies `--write-index`):
 
 - **Write:** `xz --block-size=1MiB`, `zstd -T0 -B1M`; gzip/bzip2 warn (solid).
-- **Read:** if index + named extract and stream is a decompress pipe,
-  `ArchiveStream::materialize_seekable` copies decompressed bytes to a temp file,
-  then Phase-5 `seek_to_byte` applies.
+  Index may include a comment line
+  `# compressed=<prog> seekable=materialize` (informational; load ignores `#` lines).
+- **Compressed selective extract (current policy):** full decompress **once** into a
+  temp file (`ArchiveStream::materialize_seekable`), then Phase-5 `seek_to_byte`.
+  This is **materialize-then-seek**, not true random access inside the compressed
+  stream. Cost is one full decompress + temp disk, independent of how many named
+  members are requested after materialize.
+- **When materialize runs:** only if index is present, named members are requested,
+  and the open stream is **not** seekable (decompress pipe). Plain seekable
+  archives skip this path entirely.
 - **Interop:** compressed archives remain readable by GNU tar.
-- **Not yet:** true frame-level seek without materialize (needs liblzma/libzstd APIs).
+- **Future (not implemented):** true frame-level seek without materialize
+  (liblzma block index / zstd seekable format APIs). Documented as a known gap;
+  do not claim frame-level seek today.

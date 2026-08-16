@@ -620,10 +620,15 @@ public:
         return {};
     }
 
-    Result<void> save(const std::filesystem::path& path) const {
+    /// Write index. Optional @p note becomes a `# …` comment after the magic
+    /// (ignored by load). Used for `--seekable` compressed archives.
+    Result<void> save(const std::filesystem::path& path,
+                      std::string_view note = {}) const {
         std::ofstream out(path, std::ios::trunc);
         if (!out) return std::unexpected(sys_error(path.string()));
         out << "MUTAR.INDEX.V1\n";
+        if (!note.empty())
+            out << "# " << note << '\n';
         for (const auto& e : entries_) {
             // typeflag as single char; name last
             char tf = e.typeflag ? e.typeflag : REGTYPE;
@@ -3376,7 +3381,22 @@ static int op_create(const Config& cfg) {
             print(stderr, "mutar: cannot determine index path (need -f ARCHIVE)\n");
             exit_code = EXIT_FAILURE;
         } else {
-            auto sr = create_index.save(idx_path);
+            // Optional note: compressed + --seekable still uses materialize-then-seek
+            std::string idx_note;
+            if (cfg.seekable) {
+                Compress c = cfg.compress;
+                if (c == Compress::Auto) {
+                    c = cfg.no_auto_compress ? Compress::None
+                                             : detect_compress(cfg.archive_file);
+                }
+                if (c != Compress::None && c != Compress::Auto) {
+                    const char* prog = compress_prog_for(c, cfg.compress_prog);
+                    if (prog && prog[0])
+                        idx_note = std::format(
+                            "compressed={} seekable=materialize", prog);
+                }
+            }
+            auto sr = create_index.save(idx_path, idx_note);
             if (!sr) {
                 print(stderr, "mutar: cannot write index '{}': {}\n",
                       idx_path, sr.error().message);
@@ -5369,7 +5389,10 @@ static void print_usage(const char* prog) {
         "      --write-index               Write sidecar member index (ARCHIVE.mutaridx) on create\n"
         "      --mutar-index=FILE          Sidecar index path (create write / list+extract read)\n"
         "      --seekable                  Prefer seek-friendly compress (xz/zstd blocks); implies --write-index\n"
-        "                                  Compressed extract materializes once then seeks via index\n"
+        "                                  Selective extract of compressed archives: full decompress once\n"
+        "                                  (materialize-then-seek via index). Uncompressed seekable\n"
+        "                                  archives never materialize (direct lseek). True frame-level\n"
+        "                                  seek without materialize is future (liblzma/libzstd).\n"
         "      --no-quote-chars=STRING     Disable quoting for characters from STRING\n"
         "      --quote-chars=STRING        Additionally quote characters from STRING\n"
         "      --quoting-style=STYLE       Set name quoting for -t / verbose extract\n"

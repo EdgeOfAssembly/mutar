@@ -6,7 +6,9 @@ It is **not** Jörg Schilling’s `star` (Schily tools).
 
 **Compatibility goal: ~99% with GNU tar 1.35** for common formats
 (v7, oldgnu, gnu, ustar, pax/posix) and the command-line interface in `tar(1)`.
-**SELinux is not supported** (no test hardware). Optional **sidecar index** (`--write-index` / `--mutar-index`) and **`--seekable`** enable fast list and seek extract (uncompressed direct seek; compressed materialize-then-seek). Run `./mutar --help` for options.
+**SELinux is not supported** (no test hardware). Optional **sidecar index** (`--write-index` / `--mutar-index`) and **`--seekable`** enable fast list and seek extract (uncompressed direct seek; compressed materialize-then-seek — full decompress once, not frame-level seek). Run `./mutar --help` for options.
+
+Performance claims require published benchmarks; see `PROGRESS.md` Phase F.
 
 > See `COMPATIBILITY_PROGRESS.md` for an option-by-option audit and
 > `ARCHITECTURE.md` for design details. Archived campaign: `GOAL.md`.
@@ -22,7 +24,7 @@ It is **not** Jörg Schilling’s `star` (Schily tools).
 | GNU tar interop | Formats + common CLI; **~99%** goal |
 | SELinux | Unsupported |
 | Sidecar index | `--write-index` / `--mutar-index` |
-| Seek | Uncompressed direct; compressed materialize-then-seek (`--seekable`) |
+| Seek | Uncompressed direct `lseek`; compressed **materialize-then-seek** (`--seekable`) — not frame-level |
 
 Proof log: `PROGRESS.md`. Option audit: `COMPATIBILITY_PROGRESS.md`.
 
@@ -80,7 +82,7 @@ mutar [OPTION...] [FILE...]
 | `-S` | Handle sparse files |
 | `--write-index` | Write sidecar member index (`ARCHIVE.mutaridx`) |
 | `--mutar-index=FILE` | Explicit index path (create/list/extract) |
-| `--seekable` | Seek-friendly xz/zstd blocks; implies index; compressed extract materializes then seeks |
+| `--seekable` | Seek-friendly xz/zstd blocks; implies index; compressed selective extract materializes once then seeks (not frame-level) |
 | `-H FORMAT` | Archive format: `v7` `oldgnu` `gnu` `ustar` `pax` |
 | `--strip-components=N` | Strip N leading components from paths on extract |
 | `--exclude=PATTERN` | Exclude files matching PATTERN |

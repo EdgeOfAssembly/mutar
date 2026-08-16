@@ -526,8 +526,18 @@ In `op_extract`'s `DIRTYPE` case, if the target path already exists:
 | xz multi-block write | ✅ | `--block-size=1MiB` |
 | zstd chunked write | ✅ | `-T0 -B1M` |
 | gzip/bzip2 seek | ⚠️ | Warns; materialize-then-seek still works with index |
-| Compressed selective extract | ✅ | Materialize once + index seek |
-| True frame-level seek without materialize | ❌ | Future (liblzma/libzstd APIs) |
+| Compressed selective extract | ✅ | **Materialize once** (full decompress to temp) + index seek — not frame-level |
+| Uncompressed selective extract | ✅ | Direct `lseek`; **never** materializes when stream is seekable |
+| Index comment on `--seekable` compress | ✅ | `# compressed=<prog> seekable=materialize` (informational) |
+| True frame-level seek without materialize | ❌ | Future (liblzma/libzstd APIs); Phase F G16 documents materialize-only |
+
+## Phase F — Seek/perf honesty (2026-08-16)
+
+| Item | Status | Notes |
+|------|--------|-------|
+| G16 compressed seek docs | ✅ | ARCHITECTURE / help / this table: materialize-then-seek only |
+| G17 micro-benchmarks | ✅ | `tests/bench_index_seek.sh`; numbers in `PROGRESS.md`; CTest `mutar_bench_smoke` (always pass) |
+| G18 no false speed claims | ✅ | README: performance claims require published benchmarks |
 
 ## Known Remaining Gaps
 

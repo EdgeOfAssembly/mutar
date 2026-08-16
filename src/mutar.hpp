@@ -330,7 +330,8 @@ struct Config {
 
 // ── Sidecar archive index (MUTAR.INDEX.V1) ─────────────────────────────────────
 // Optional; zero cost when unused. Offsets are byte positions in the
-// *uncompressed* tar stream (seek only works on seekable uncompressed archives).
+// *uncompressed* tar stream. Uncompressed seekable archives use direct lseek
+// (never materialize). Compressed selective extract materializes once then seeks.
 
 struct IndexEntry {
     std::string  name;

@@ -103,3 +103,37 @@ Sanitizer Debug build: `-fsanitize=address,undefined -fno-sanitize-recover=all`.
 - `--pax-option` keywords beyond `delete=`
 - SELinux (out of scope)
 - Phases E–H (incremental/remote, seek/perf, formal/man, v0.2.0 freeze)
+
+---
+
+## Phase F micro-benchmarks (2026-08-16)
+
+**Machine:** `dungeon` · `nproc=8` · Debug sanitizer build (`build/mutar`)  
+**Command:** `BENCH_MEMBERS=2000 bash tests/bench_index_seek.sh build/mutar`  
+**Script:** `tests/bench_index_seek.sh` (exit 0; not a pass/fail gate)
+
+### Raw timings (ms)
+
+| Operation | ms |
+|-----------|-----|
+| sequential list (no index), 2000 members | 55 |
+| index list, 2000 members | 69 |
+| sequential extract one late member (plain) | 48 |
+| index seek extract one late member (plain) | 62 |
+| xz index + materialize extract one late member | 66 |
+
+Notes:
+- Small members (~few bytes each); index path has sidecar I/O overhead that can dominate
+  sequential scan on tiny archives — numbers are honest, not marketing.
+- Compressed selective extract is **materialize-then-seek** (full decompress once); not
+  frame-level seek. Uncompressed seekable archives never materialize.
+- CTest smoke: `mutar_bench_smoke` (`BENCH_MEMBERS=100`, LABELS `Benchmark`, always exit 0).
+- Performance claims require published benchmarks; see this section (G18).
+
+### G16–G18 deliverables
+
+| ID | Result |
+|----|--------|
+| G16 | Docs + help: materialize-then-seek only; uncompressed never materializes; optional index `# compressed=… seekable=materialize` |
+| G17 | Bench numbers above; `mutar_bench_smoke` CTest |
+| G18 | README disclaimer: no faster-than-GNU claims without numbers |

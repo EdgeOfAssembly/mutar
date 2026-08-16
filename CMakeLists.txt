@@ -226,6 +226,19 @@ add_test(
   WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
 )
 
+# Phase F G17: index/seek micro-benchmark smoke (always passes; not a fail gate)
+# Full numbers: BENCH_MEMBERS=2000 bash tests/bench_index_seek.sh build/mutar
+add_test(
+  NAME mutar_bench_smoke
+  COMMAND bash -c "BENCH_MEMBERS=100 bash \"${CMAKE_SOURCE_DIR}/tests/bench_index_seek.sh\" \"$1\"; exit 0"
+          _ $<TARGET_FILE:mutar>
+  WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+)
+set_tests_properties(mutar_bench_smoke PROPERTIES
+  LABELS "Benchmark"
+  TIMEOUT 120
+)
+
 # Boundary / overflow / memory tests binary
 # Compiled with AddressSanitizer + UndefinedBehaviorSanitizer so any OOB
 # access, integer overflow, use-after-free, etc. are caught at runtime.
