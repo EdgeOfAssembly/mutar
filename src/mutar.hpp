@@ -33,6 +33,7 @@
 
 #ifdef MUTAR_HAVE_ACL
 #  include <sys/acl.h>
+#  include <acl/libacl.h>  // acl_equiv_mode
 #endif
 
 namespace mutar {
@@ -372,10 +373,9 @@ struct Entry {
     std::int64_t real_size       = 0;
     std::vector<SparseMap> sparse_map;
 
-    // PAX extended attributes
+    // PAX extended attributes (includes SCHILY.xattr.* / SCHILY.acl.* on create)
     std::map<std::string, std::string> pax_attrs;
 
-    // xattrs, ACLs (stored as PAX attrs)
     // Block offset in archive (for diagnostics)
     std::int64_t block_offset = 0;
 };

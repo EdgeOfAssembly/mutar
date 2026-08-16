@@ -131,10 +131,10 @@ Legend:
 | `--atime-preserve[=METHOD]` | ✅ | |
 | `--utc` | ✅ | |
 | `--full-time` | 🔧 | Nanosecond timestamps now shown in `--list` |
-| `--xattrs` / `--no-xattrs` | ⚠️ | Build-time detection: present only when `MUTAR_HAVE_XATTR` (sys/xattr.h + listxattr). Option accepted; xattr data not yet stored in archive. |
-| `--xattrs-include=MASK` / `--xattrs-exclude=MASK` | ⚠️ | Build-time detection: same guard. Patterns stored; no-op until xattr archive I/O is wired. |
-| `--acls` / `--no-acls` | ⚠️ | Build-time detection: present only when `MUTAR_HAVE_ACL` (sys/acl.h + libacl). Compiled out if libacl not found; unknown-option error if invoked without support. |
-| `--selinux` / `--no-selinux` | ❌ Unsupported | Project policy: no SELinux test hardware. Options accepted as no-ops with warning. |
+| `--xattrs` / `--no-xattrs` | ✅ | When `MUTAR_HAVE_XATTR`: create stores via `llistxattr`/`lgetxattr` as PAX `SCHILY.xattr.*` (raw values, GNU interop); extract restores with `lsetxattr`. Never stores `security.selinux`. Skips `system.posix_acl_*` (use `--acls`). |
+| `--xattrs-include=MASK` / `--xattrs-exclude=MASK` | ✅ | fnmatch filters applied on store; include empty ⇒ all non-skipped keys; exclude always applied. |
+| `--acls` / `--no-acls` | ✅ | When `MUTAR_HAVE_ACL`: create stores non-trivial access ACL + default ACL (dirs) as `SCHILY.acl.access` / `SCHILY.acl.default` text; extract `acl_from_text` + `acl_set_file`. |
+| `--selinux` / `--no-selinux` | ❌ Unsupported | Project policy: no SELinux test hardware. Options accepted as no-ops with warning. Never stored even with `--xattrs`. |
 
 ### Extraction Behaviour
 
@@ -460,6 +460,24 @@ continues.
 length is rejected with a clear error — mid-file split (`GNUTYPE_MULTIVOL` 'M')
 is not implemented. Tests: `tests/test_multi_volume.sh`.
 
+### 4b. xattrs + ACLs (GOAL_NEXT Phase D / G6–G8)
+
+When built with `MUTAR_HAVE_XATTR` / `MUTAR_HAVE_ACL` (CMake detection):
+
+- **Create (`--xattrs`)**: `llistxattr` + `lgetxattr`; emit PAX records
+  `SCHILY.xattr.<key>=<raw-value>` (GNU tar interop; keyword percent-encodes
+  `=` / `%` only). Always skips `security.selinux` and `system.posix_acl_*`.
+  `--xattrs-include` / `--xattrs-exclude` use `fnmatch`.
+- **Create (`--acls`)**: `acl_get_file` ACCESS (+ DEFAULT for dirs);
+  non-trivial access ACLs and default ACLs stored as `SCHILY.acl.access` /
+  `SCHILY.acl.default` text (`acl_to_text`).
+- **Extract**: with matching flags, `lsetxattr` / `acl_from_text`+`acl_set_file`
+  after the file/dir is created. Without the flag, SCHILY records are ignored.
+- **SELinux (G9)**: still unsupported; `--selinux` no-op + warning; never stored.
+
+Tests: `tests/test_xattrs_acls.sh` (CTest `mutar_xattrs_acls_tests`); skips when
+libs/tools/FS lack support.
+
 ### 5. Remote tape / rmt (`--rsh-command` / `--rmt-command`)
 
 `is_remote_archive()` detects `[user@]host:path` syntax. `open_remote_stream()`
@@ -529,7 +547,7 @@ compatibility.
 | `--backup` / `--suffix` | `backup`, `backup_control`, `backup_suffix` | ⚠️ Simple suffix rename on extract works; numbered/existing CONTROL not implemented |
 | `--sparse-version` | `sparse_version` | ⚠️ String stored; `sparse_major`/`sparse_minor` never parsed; write hardcodes 1.0 |
 | `-L` / `--tape-length` | `tape_length_str`, `tape_length` | ✅ Phase C: numeric parse into `tape_length`; implies `-M` |
-| `--xattrs` / `--acls` | `xattrs`, `acls` | Build-time detection; flags accepted; **store/restore not yet implemented** (GOAL_NEXT G6–G8) |
+| `--xattrs` / `--acls` | `xattrs`, `acls` | ✅ Store/restore via SCHILY PAX (GOAL_NEXT Phase D / G6–G8); SELinux still unsupported |
 | `--selinux` / `--no-selinux` | `selinux` | **Unsupported by policy** (no test hardware); accepted as no-op with warning |
 | `-G` / `-g` (incremental) | `listed_incremental` | ✅ PR #172: snapshot written at level-0; level≥1 skips unchanged files. Limitation: only regular files compared by mtime. |
 | `-M` (multi-volume) | `multi_volume` | ⚠️ Phase C: between-member stream swap create+extract; **mid-file split still TODO** |
@@ -554,6 +572,7 @@ bash tests/run_tests.sh         build/mutar
 bash tests/test_formats_compression.sh  build/mutar
 bash tests/test_sparse.sh       build/mutar
 bash tests/test_new_options.sh  build/mutar
+bash tests/test_xattrs_acls.sh  build/mutar
 ```
 
 ### What the tests verify
@@ -579,6 +598,11 @@ bash tests/test_new_options.sh  build/mutar
   `--checkpoint-action`, `--full-time`, `--preserve-order`,
   `--overwrite-dir`, `--exclude-vcs-ignores`, `--hole-detection`,
   `--level=0`, and `--help` completeness.
+
+- **`test_xattrs_acls.sh`**: Phase D — `user.test` xattr round-trip with
+  `--xattrs --posix`, include/exclude filters, ACL + default-ACL round-trip
+  with `--acls`, and extract without `--xattrs` leaves attrs unset. Skips
+  when build or host lacks support.
 
 ### Interoperability verification
 

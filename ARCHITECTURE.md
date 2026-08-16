@@ -211,7 +211,7 @@ process and reading `#1 in mutar::pax_append` directly from the backtrace.
 
 ## Known Gaps (Future PRs)
 
-- **xattrs / ACLs / SELinux**: flag parsed, hooks present, not stored
+- **xattrs / ACLs**: store/restore via PAX `SCHILY.xattr.*` / `SCHILY.acl.*` when `MUTAR_HAVE_XATTR` / `MUTAR_HAVE_ACL`; SELinux never stored
 - **Incremental backups** (`-G -g`): `--level=0` done; full snapshot state file not yet maintained
 - **Remote tape** (`--rsh/rmt-command`): `rmt` protocol not wired
 - **Multi-volume** (`-M`): volume switching not implemented

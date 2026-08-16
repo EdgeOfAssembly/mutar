@@ -135,12 +135,11 @@ See `COMPATIBILITY_PROGRESS.md` for the full option audit. Short list matching c
 **Partial (do not claim complete):**
 - Multi-volume (`-M -L`): between-member create/extract + stream swap; mid-file split not supported
 - `--pax-option` — `delete=KEYWORD` only (other keywords ignored)
-- `--xattrs` / `--acls` (and include/exclude) — flags only; no store/restore
 - `--backup` / `--suffix` — simple suffix rename works; numbered/existing CONTROL not implemented
 - `-s` / `--preserve-order` — accepted with not-implemented warning
 - `--sparse-version` — string stored; write hardcodes 1.0
 
-**Implemented (do not list as no-ops):** `--verify`, `--hole-detection`, `--owner-map` / `--group-map`, `--exclude-vcs-ignores`, `--index-file`, `--checkpoint-action`, `--interactive`, `--full-time`, `--warning`, wildcards/anchoring, `--overwrite-dir` / `--no-overwrite-dir`, and related PR #170/#172 features.
+**Implemented (do not list as no-ops):** `--xattrs` / `--acls` (SCHILY PAX store/restore when built with lib support), `--verify`, `--hole-detection`, `--owner-map` / `--group-map`, `--exclude-vcs-ignores`, `--index-file`, `--checkpoint-action`, `--interactive`, `--full-time`, `--warning`, wildcards/anchoring, `--overwrite-dir` / `--no-overwrite-dir`, and related PR #170/#172 features.
 
 ---
 

@@ -204,7 +204,7 @@ Magic-byte auto-detection works on read even without `-a`.
 | `--info-script` / `--new-volume-script` | ✅ | Exec'd at volume boundary; TAR_ARCHIVE/TAR_VOLUME; non-zero fails |
 | `--restrict` | ⚠️ Partial | Stored (`restrict_opt`); restrictions not enforced |
 | `--quoting-style` | ⚠️ Partial | Stored; list/verbose output never consults style |
-| `--xattrs` / `--acls` | ⚠️ Partial | Flags accepted when built; store/restore not implemented |
+| `--xattrs` / `--acls` | ✅ | Store/restore via PAX `SCHILY.xattr.*` / `SCHILY.acl.*` when built with lib support; SELinux never stored |
 | `--selinux` / `--no-selinux` | ❌ Unsupported | Policy: no-op + warning (no test hardware) |
 | `-G -g --listed-incremental` | ⚠️ Partial | Level-0 snapshot + level≥1 mtime skip for regular files; dirs/specials always archived |
 | `--multi-volume -M -L` | ⚠️ Partial | Between-member rotation + extract stream swap; mid-file split not supported |
@@ -220,7 +220,7 @@ Magic-byte auto-detection works on read even without `-a`.
 
 | Feature | Notes |
 |---------|-------|
-| xattrs / ACLs | Flags only; no store/restore (SELinux unsupported by policy) |
+| SELinux | Unsupported by policy (`--selinux` no-op + warning); never stored under `--xattrs` |
 | Incremental backups (`-G -g`) | Snapshot works for regular-file mtime; dirs/specials always archived |
 | Remote tape (`--rsh/rmt-command`) | Bridge works; lseek over rmt / remote append not implemented |
 | Multi-volume mid-file split | Between-member works; single file > tape length errors (no GNUTYPE_MULTIVOL) |

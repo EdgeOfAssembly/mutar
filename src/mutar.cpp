@@ -801,7 +801,8 @@ static Block encode_header(const Entry& e, const Config& cfg) {
     return !cfg.pax_option_rules.delete_keywords.contains(std::string(key));
 }
 
-// Encode a PAX record: "N keyword=value\n" where N = total length
+// Encode a PAX record: "N keyword=value\n" where N = total length.
+// Value may contain arbitrary bytes (GNU SCHILY.xattr raw binary); length is authoritative.
 static void pax_append(std::string& out, std::string_view key, std::string_view val) {
     // Converge on the total record length: len = digits(len) + 1(space) + key + 1(=) + val + 1(\n)
     // e.g. "30 mtime=1234567890.123456789\n" has len=30, "30" is 2 digits, base=28
@@ -838,13 +839,218 @@ static std::map<std::string, std::string> pax_parse(std::string_view data) {
         for (char c : data.substr(0, sp))
             if (c >= '0' && c <= '9') total = total * 10 + static_cast<unsigned>(c - '0');
         if (total == 0 || total > data.size()) break;
-        std::string_view rec = data.substr(sp + 1, total - sp - 2); // strip leading size+space and trailing \n
+        // Keyword ends at first '='; value is the rest up to the trailing '\n' (may be binary).
+        std::string_view rec = data.substr(sp + 1, total - sp - 2);
         auto eq = rec.find('=');
         if (eq != std::string_view::npos)
             attrs[std::string(rec.substr(0, eq))] = std::string(rec.substr(eq + 1));
         data = data.substr(total);
     }
     return attrs;
+}
+
+// ── xattr / ACL helpers (SCHILY PAX keywords; SELinux never stored) ───────────
+
+static bool entry_has_schily_pax(const Entry& e) {
+    for (const auto& [k, v] : e.pax_attrs) {
+        (void)v;
+        if (k.starts_with("SCHILY.")) return true;
+    }
+    return false;
+}
+
+static void pax_append_schily(std::string& out, const Config& cfg, const Entry& e) {
+    for (const auto& [k, v] : e.pax_attrs) {
+        if (k.starts_with("SCHILY."))
+            pax_append_if(out, cfg, k, v);
+    }
+}
+
+#ifdef MUTAR_HAVE_XATTR
+// GNU tar percent-encodes only '=' and '%' in the xattr *name* (keyword); values are raw.
+static std::string xattr_encode_keyword(std::string_view name) {
+    std::string out;
+    out.reserve(name.size());
+    for (unsigned char c : name) {
+        if (c == '=' || c == '%') {
+            out += '%';
+            static constexpr char hex[] = "0123456789ABCDEF";
+            out += hex[c >> 4];
+            out += hex[c & 0xf];
+        } else {
+            out += static_cast<char>(c);
+        }
+    }
+    return out;
+}
+
+static std::string xattr_decode_keyword(std::string_view enc) {
+    std::string out;
+    out.reserve(enc.size());
+    for (std::size_t i = 0; i < enc.size(); ++i) {
+        if (enc[i] == '%' && i + 2 < enc.size()) {
+            auto hex = [](char c) -> int {
+                if (c >= '0' && c <= '9') return c - '0';
+                if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+                if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+                return -1;
+            };
+            int hi = hex(enc[i + 1]), lo = hex(enc[i + 2]);
+            if (hi >= 0 && lo >= 0) {
+                out += static_cast<char>((hi << 4) | lo);
+                i += 2;
+                continue;
+            }
+        }
+        out += enc[i];
+    }
+    return out;
+}
+
+static bool xattr_key_matches(std::string_view key, std::string_view pattern) {
+    return ::fnmatch(std::string(pattern).c_str(), std::string(key).c_str(), 0) == 0;
+}
+
+/// Whether to store this xattr key under --xattrs (include/exclude + hard skips).
+static bool xattr_key_wanted(const Config& cfg, std::string_view key) {
+    // Never store SELinux context (unsupported by project policy).
+    if (key == "security.selinux") return false;
+    // POSIX ACL xattrs are handled by --acls → SCHILY.acl.*; skip raw forms.
+    if (key == "system.posix_acl_access" || key == "system.posix_acl_default")
+        return false;
+    if (!cfg.xattrs_exclude.empty()) {
+        for (const auto& pat : cfg.xattrs_exclude) {
+            if (xattr_key_matches(key, pat)) return false;
+        }
+    }
+    if (!cfg.xattrs_include.empty()) {
+        for (const auto& pat : cfg.xattrs_include) {
+            if (xattr_key_matches(key, pat)) return true;
+        }
+        return false;
+    }
+    return true;
+}
+
+static void collect_xattrs(Entry& e, const std::string& fspath, const Config& cfg) {
+    if (!cfg.xattrs) return;
+    ssize_t list_sz = ::llistxattr(fspath.c_str(), nullptr, 0);
+    if (list_sz <= 0) return;
+    std::string list(static_cast<std::size_t>(list_sz), '\0');
+    list_sz = ::llistxattr(fspath.c_str(), list.data(), list.size());
+    if (list_sz < 0) return;
+    std::size_t i = 0;
+    const std::size_t n = static_cast<std::size_t>(list_sz);
+    while (i < n) {
+        const char* key_c = list.data() + i;
+        std::size_t key_len = std::strlen(key_c);
+        if (key_len == 0) break;
+        std::string_view key(key_c, key_len);
+        i += key_len + 1;
+        if (!xattr_key_wanted(cfg, key)) continue;
+        ssize_t vsz = ::lgetxattr(fspath.c_str(), key_c, nullptr, 0);
+        if (vsz < 0) continue;
+        std::string val(static_cast<std::size_t>(vsz), '\0');
+        if (vsz > 0) {
+            if (::lgetxattr(fspath.c_str(), key_c, val.data(), val.size()) < 0)
+                continue;
+        }
+        std::string pax_key = "SCHILY.xattr." + xattr_encode_keyword(key);
+        e.pax_attrs[std::move(pax_key)] = std::move(val);
+    }
+}
+
+static void restore_xattrs(const Entry& e, const std::string& path, const Config& cfg) {
+    if (!cfg.xattrs) return;
+    constexpr std::string_view prefix = "SCHILY.xattr.";
+    for (const auto& [k, v] : e.pax_attrs) {
+        if (!k.starts_with(prefix)) continue;
+        std::string name = xattr_decode_keyword(std::string_view(k).substr(prefix.size()));
+        if (name == "security.selinux") continue;
+        if (name == "system.posix_acl_access" || name == "system.posix_acl_default")
+            continue;
+        if (::lsetxattr(path.c_str(), name.c_str(), v.data(), v.size(), 0) < 0) {
+            print(stderr, "mutar: {}: setxattr({}): {}\n",
+                  path, name, std::strerror(errno));
+        }
+    }
+}
+#else
+static void collect_xattrs(Entry&, const std::string&, const Config&) {}
+static void restore_xattrs(const Entry&, const std::string&, const Config&) {}
+#endif // MUTAR_HAVE_XATTR
+
+#ifdef MUTAR_HAVE_ACL
+static void collect_acls(Entry& e, const std::string& fspath, const Config& cfg, bool is_dir) {
+    if (!cfg.acls) return;
+    acl_t access_acl = ::acl_get_file(fspath.c_str(), ACL_TYPE_ACCESS);
+    if (access_acl) {
+        mode_t equiv = 0;
+        // Skip trivial ACLs that are fully represented by the mode bits.
+        if (::acl_equiv_mode(access_acl, &equiv) != 0) {
+            ssize_t len = 0;
+            char* txt = ::acl_to_text(access_acl, &len);
+            if (txt) {
+                e.pax_attrs["SCHILY.acl.access"] = std::string(txt, static_cast<std::size_t>(
+                    len > 0 ? len : static_cast<ssize_t>(std::strlen(txt))));
+                ::acl_free(txt);
+            }
+        }
+        ::acl_free(access_acl);
+    }
+    if (is_dir) {
+        acl_t def_acl = ::acl_get_file(fspath.c_str(), ACL_TYPE_DEFAULT);
+        if (def_acl) {
+            // Default ACLs are never "trivial" in the mode sense; store if non-empty.
+            ssize_t len = 0;
+            char* txt = ::acl_to_text(def_acl, &len);
+            if (txt && txt[0] != '\0') {
+                // Empty default ACL text is typically just "" — skip pure empty.
+                bool only_ws = true;
+                for (const char* p = txt; *p; ++p) {
+                    if (*p != ' ' && *p != '\t' && *p != '\n') { only_ws = false; break; }
+                }
+                if (!only_ws) {
+                    e.pax_attrs["SCHILY.acl.default"] = std::string(txt, static_cast<std::size_t>(
+                        len > 0 ? len : static_cast<ssize_t>(std::strlen(txt))));
+                }
+                ::acl_free(txt);
+            } else if (txt) {
+                ::acl_free(txt);
+            }
+            ::acl_free(def_acl);
+        }
+    }
+}
+
+static void restore_acls(const Entry& e, const std::string& path, const Config& cfg) {
+    if (!cfg.acls) return;
+    auto set_one = [&](const char* key, acl_type_t type) {
+        auto it = e.pax_attrs.find(key);
+        if (it == e.pax_attrs.end()) return;
+        acl_t acl = ::acl_from_text(it->second.c_str());
+        if (!acl) {
+            print(stderr, "mutar: {}: acl_from_text({}): {}\n",
+                  path, key, std::strerror(errno));
+            return;
+        }
+        if (::acl_set_file(path.c_str(), type, acl) < 0) {
+            print(stderr, "mutar: {}: acl_set_file({}): {}\n",
+                  path, key, std::strerror(errno));
+        }
+        ::acl_free(acl);
+    };
+    set_one("SCHILY.acl.access", ACL_TYPE_ACCESS);
+    set_one("SCHILY.acl.default", ACL_TYPE_DEFAULT);
+}
+#else
+static void collect_acls(Entry&, const std::string&, const Config&, bool) {}
+static void restore_acls(const Entry&, const std::string&, const Config&) {}
+#endif // MUTAR_HAVE_ACL
+
+static void restore_xattrs_acls(const Entry& e, const std::string& path, const Config& cfg) {
+    restore_xattrs(e, path, cfg);
+    restore_acls(e, path, cfg);
 }
 
 // ── Owner/group map helpers ───────────────────────────────────────────────────
@@ -1608,6 +1814,11 @@ public:
             if (endp && *endp == '\0' && m >= 0) e.mode = static_cast<unsigned>(m) & 07777;
         }
 
+        // Collect xattrs / ACLs into e.pax_attrs as SCHILY.* (before any write path).
+        const bool is_dir = S_ISDIR(st.st_mode);
+        collect_xattrs(e, fspath, cfg);
+        collect_acls(e, fspath, cfg, is_dir);
+
         if (S_ISREG(st.st_mode)) {
             e.typeflag = REGTYPE;
             e.size     = st.st_size;
@@ -1615,7 +1826,7 @@ public:
             if (cfg.sparse && st.st_size > 0)
                 return write_sparse(e, fspath, cfg, st);
             return write_regular(e, fspath, cfg, st);
-        } else if (S_ISDIR(st.st_mode)) {
+        } else if (is_dir) {
             e.typeflag = DIRTYPE;
             if (!e.name.empty() && e.name.back() != '/') e.name += '/';
             e.size = 0;
@@ -1692,7 +1903,8 @@ private:
         write_data_bytes(data.data(), data.size());
     }
 
-    // Write PAX extended header (honours --pax-option delete=KEYWORD)
+    // Write PAX extended header (honours --pax-option delete=KEYWORD).
+    // Also emits SCHILY.xattr.* / SCHILY.acl.* collected into e.pax_attrs.
     void write_pax_header(const Entry& e, bool need_path, bool need_link,
                           bool need_size, bool need_time, const Config& cfg) {
         std::string pax_data;
@@ -1714,6 +1926,7 @@ private:
             pax_append_if(pax_data, cfg, "uname", e.uname);
         if (!e.gname.empty())
             pax_append_if(pax_data, cfg, "gname", e.gname);
+        pax_append_schily(pax_data, cfg, e);
 
         if (pax_data.empty()) return;
 
@@ -1758,10 +1971,13 @@ private:
     void maybe_write_extensions(const Entry& e, const Config& cfg) {
         bool long_name = e.name.size() > 100;
         bool long_link = e.linkname.size() > 100;
+        bool need_schily = entry_has_schily_pax(e);
+        bool need_pax = long_name || long_link || e.size > 077777777777LL
+                        || e.mtime_nsec != 0 || need_schily;
 
-        if (fmt_ == Format::PAX || fmt_ == Format::USTAR) {
-            // PAX path works for any length; use PAX extended header
-            if (long_name || long_link || e.size > 077777777777LL || e.mtime_nsec != 0)
+        // SCHILY xattr/ACL records require a PAX 'x' header even under GNU format.
+        if (fmt_ == Format::PAX || fmt_ == Format::USTAR || need_schily) {
+            if (need_pax)
                 write_pax_header(e, long_name, long_link,
                                  e.size > 077777777777LL, e.mtime_nsec != 0, cfg);
         } else {
@@ -1883,6 +2099,7 @@ private:
                 pax_append_if(pax_data, cfg, "uname", e.uname);
             if (!e.gname.empty())
                 pax_append_if(pax_data, cfg, "gname", e.gname);
+            pax_append_schily(pax_data, cfg, e);
 
             // Emit PAX 'x' extended header block
             Entry pax_meta;
@@ -3379,6 +3596,7 @@ static int op_extract(const Config& cfg) {
             } else {
                 dir_fixups.push_back({dpath, e.mtime, e.mtime_nsec, e.mode});
             }
+            restore_xattrs_acls(e, dpath, cfg);
             reader.skip_entry(e);
             break;
         }
@@ -3388,6 +3606,8 @@ static int op_extract(const Config& cfg) {
             if (::symlink(e.linkname.c_str(), outpath.c_str()) < 0) {
                 print(stderr, "mutar: symlink {}: {}\n", outpath, std::strerror(errno));
                 exit_code = EXIT_FAILURE;
+            } else {
+                restore_xattrs_acls(e, outpath, cfg);
             }
             reader.skip_entry(e);
             break;
@@ -3584,6 +3804,9 @@ static int op_extract(const Config& cfg) {
                 }
                 ::lchown(outpath.c_str(), uid_val, gid_val);
             }
+
+            // Extended attributes and POSIX ACLs (SCHILY.* from PAX header)
+            restore_xattrs_acls(e, outpath, cfg);
             break;
         }
         }
@@ -4830,15 +5053,15 @@ static void print_usage(const char* prog) {
     print("\nHandling of extended file attributes:\n");
 #ifdef MUTAR_HAVE_ACL
     print(
-        "      --acls                      Enable the POSIX ACLs support (accepted; store/restore not yet implemented)\n"
+        "      --acls                      Store/restore POSIX ACLs (SCHILY.acl.* in PAX headers)\n"
         "      --no-acls                   Disable the POSIX ACLs support\n");
 #endif
 #ifdef MUTAR_HAVE_XATTR
     print(
-        "      --xattrs                    Enable extended attributes support (accepted; store/restore not yet implemented)\n"
+        "      --xattrs                    Store/restore extended attributes (SCHILY.xattr.* in PAX)\n"
         "      --no-xattrs                 Disable extended attributes support\n"
-        "      --xattrs-exclude=MASK       Specify the exclude pattern for xattr keys\n"
-        "      --xattrs-include=MASK       Specify the include pattern for xattr keys\n");
+        "      --xattrs-exclude=MASK       Exclude xattr keys matching MASK (fnmatch)\n"
+        "      --xattrs-include=MASK       Only include xattr keys matching MASK (fnmatch)\n");
 #endif
 #endif // xattr/acl
     print(
