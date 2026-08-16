@@ -2598,7 +2598,8 @@ public:
         int rc = cfg.dereference ? ::stat(fspath.c_str(), &st)
                                  : ::lstat(fspath.c_str(), &st);
         if (rc < 0) {
-            print(stderr, "mutar: {}: {}\n", fspath, std::strerror(errno));
+            mutar_warn(cfg, "failed-read",
+                       std::format("{}: {}", fspath, std::strerror(errno)));
             return false;
         }
 
@@ -2886,7 +2887,8 @@ private:
 
         int fd = open_for_dump(fspath, cfg);
         if (fd < 0) {
-            print(stderr, "mutar: {}: {}\n", fspath, std::strerror(errno));
+            mutar_warn(cfg, "failed-read",
+                       std::format("{}: {}", fspath, std::strerror(errno)));
             write_data_zeros(e.size);
             return false;
         }
@@ -3020,7 +3022,11 @@ private:
     bool write_sparse(Entry& e, const std::string& fspath,
                       const Config& cfg, const struct stat& st) {
         int fd = open_for_dump(fspath, cfg);
-        if (fd < 0) { print(stderr, "mutar: {}: {}\n", fspath, std::strerror(errno)); return false; }
+        if (fd < 0) {
+            mutar_warn(cfg, "failed-read",
+                       std::format("{}: {}", fspath, std::strerror(errno)));
+            return false;
+        }
 
         auto segs = detect_sparse_segments(fd, e.size, cfg.hole_detection);
 
@@ -3701,7 +3707,9 @@ static std::vector<SparseSegment> detect_sparse_segments(int fd, std::int64_t fi
 // Recursive directory walker.
 // @param inherited_ignore_pats  Patterns from ancestor --exclude-ignore-recursive
 //        files; applied to this directory's children and passed further down.
-static void walk_dir(const std::string& base_dir, const std::string& relpath,
+// @return false if a path could not be read (lstat/opendir); true on success.
+//         Exclusion skips still return true. Callers honour --ignore-failed-read.
+static bool walk_dir(const std::string& base_dir, const std::string& relpath,
                      const Config& cfg,
                      std::function<void(const std::string& archname, const std::string& fspath)> cb,
                      dev_t same_dev = static_cast<dev_t>(-1),
@@ -3710,8 +3718,9 @@ static void walk_dir(const std::string& base_dir, const std::string& relpath,
 
     struct stat st{};
     if (::lstat(full.c_str(), &st) < 0) {
-        mutar_warn(cfg, "failed-read", std::format("{}: {}", full, std::strerror(errno)));
-        return;
+        mutar_warn(cfg, "failed-read",
+                   std::format("{}: {}", full, std::strerror(errno)));
+        return false;
     }
 
     std::string archname = relpath;
@@ -3727,7 +3736,7 @@ static void walk_dir(const std::string& base_dir, const std::string& relpath,
     if (is_excluded(cfg, archname)) {
         if (cfg.show_omitted_dirs && S_ISDIR(st.st_mode))
             print(stderr, "mutar: {}/\n", archname);
-        return;
+        return true;
     }
 
     cb(archname, full);
@@ -3737,7 +3746,11 @@ static void walk_dir(const std::string& base_dir, const std::string& relpath,
         dev_t this_dev = (same_dev == static_cast<dev_t>(-1)) ? st.st_dev : same_dev;
         // Walk contents
         DIR* d = ::opendir(full.c_str());
-        if (!d) { print(stderr, "mutar: opendir {}: {}\n", full, std::strerror(errno)); return; }
+        if (!d) {
+            mutar_warn(cfg, "failed-read",
+                       std::format("opendir {}: {}", full, std::strerror(errno)));
+            return false;
+        }
         std::vector<std::string> entries;
         while (struct dirent* de = ::readdir(d)) {
             std::string_view dname(de->d_name);
@@ -3771,7 +3784,7 @@ static void walk_dir(const std::string& base_dir, const std::string& relpath,
                 cache_tag_present = true;
         }
         if (cache_tag_present && (cfg.exclude_caches_all || cfg.exclude_caches_under))
-            return; // skip all contents entirely
+            return true; // skip all contents entirely
 
         // ── Per-directory exclusion: user-specified tag files ─────────────────
         // --exclude-tag-all / --exclude-tag-under: skip ALL contents.
@@ -3795,7 +3808,7 @@ static void walk_dir(const std::string& base_dir, const std::string& relpath,
         if (!cfg.exclude_tags_under.empty())
             scan_tags(cfg.exclude_tags_under, nullptr);
         if (skip_all_tag)
-            return; // skip all contents (--exclude-tag-all / --exclude-tag-under)
+            return true; // skip all contents (--exclude-tag-all / --exclude-tag-under)
 
         // --exclude-vcs-ignores: read .gitignore/.hgignore/.cvsignore/.bzrignore patterns
         std::vector<std::string> vcs_patterns;
@@ -3821,6 +3834,7 @@ static void walk_dir(const std::string& base_dir, const std::string& relpath,
             child_ignore_pats.insert(child_ignore_pats.end(), more.begin(), more.end());
         }
 
+        bool walk_ok = true;
         for (const auto& ent : entries) {
             std::string child_arch = (archname == "." || archname.empty())
                 ? ent : (archname + "/" + ent);
@@ -3860,9 +3874,12 @@ static void walk_dir(const std::string& base_dir, const std::string& relpath,
                     continue;
                 }
             }
-            walk_dir("", child, cfg, cb, this_dev, child_ignore_pats);
+            if (!walk_dir("", child, cfg, cb, this_dev, child_ignore_pats))
+                walk_ok = false;
         }
+        return walk_ok;
     }
+    return true;
 }
 
 // ── Name quoting (--quoting-style / --quote-chars / --no-quote-chars) ─────────
@@ -4340,6 +4357,48 @@ static bool remove_path_recursive(const std::string& path) {
     std::error_code ec;
     fs::remove_all(path, ec);
     return !ec;
+}
+
+/// Empty a directory's children for --recursive-unlink (keeps the directory itself).
+/// @return true if every child was removed (or the directory was empty).
+static bool empty_directory_contents(const std::string& dirpath) {
+    DIR* d = ::opendir(dirpath.c_str());
+    if (!d)
+        return false;
+    std::vector<std::string> names;
+    while (struct dirent* de = ::readdir(d)) {
+        std::string_view n(de->d_name);
+        if (n == "." || n == "..")
+            continue;
+        names.emplace_back(n);
+    }
+    ::closedir(d);
+    bool ok = true;
+    for (const auto& name : names) {
+        const std::string full = dirpath + "/" + name;
+        if (!remove_path_recursive(full))
+            ok = false;
+    }
+    return ok;
+}
+
+/// Prepare an existing path so a directory member can be extracted.
+/// --recursive-unlink: remove non-dir at path, or empty existing directory hierarchy.
+static void recursive_unlink_prepare(const std::string& dpath, const Config& cfg) {
+    if (!cfg.recursive_unlink)
+        return;
+    struct stat st{};
+    if (::lstat(dpath.c_str(), &st) != 0)
+        return;
+    if (S_ISDIR(st.st_mode)) {
+        if (!empty_directory_contents(dpath))
+            print(stderr, "mutar: {}: cannot empty directory: {}\n",
+                  dpath, std::strerror(errno));
+    } else {
+        if (::unlink(dpath.c_str()) < 0)
+            print(stderr, "mutar: {}: cannot unlink: {}\n",
+                  dpath, std::strerror(errno));
+    }
 }
 
 /// Parse dumpdir body into map name → control code (first char of each record).
@@ -4989,10 +5048,13 @@ static int op_create(const Config& cfg) {
             }
         }
 
-        if (!writer.add_path(archname, fspath, cfg))
-            exit_code = EXIT_FAILURE;
-        else if (cfg.remove_files)
+        if (!writer.add_path(archname, fspath, cfg)) {
+            // --ignore-failed-read: warn already emitted; do not fail the create
+            if (!cfg.ignore_failed_read)
+                exit_code = EXIT_FAILURE;
+        } else if (cfg.remove_files) {
             files_to_remove.push_back(fspath);
+        }
 
         // --checkpoint progress
         if (cfg.checkpoint > 0) {
@@ -5002,11 +5064,15 @@ static int op_create(const Config& cfg) {
         }
     };
 
+    auto note_walk_fail = [&](bool ok) {
+        if (!ok && !cfg.ignore_failed_read)
+            exit_code = EXIT_FAILURE;
+    };
     if (cfg.files.empty()) {
-        walk_dir("", ".", cfg, add_file);
+        note_walk_fail(walk_dir("", ".", cfg, add_file));
     } else {
         for (const auto& f : cfg.files)
-            walk_dir("", f, cfg, add_file);
+            note_walk_fail(walk_dir("", f, cfg, add_file));
     }
 
     writer.finish();
@@ -5472,6 +5538,9 @@ static int op_extract(const Config& cfg) {
                 }
             }
 
+            // --recursive-unlink: empty existing hierarchy (or remove non-dir) first
+            recursive_unlink_prepare(dpath, cfg);
+
             // Check what already exists at dpath
             struct stat existing_st{};
             bool path_exists = (::lstat(dpath.c_str(), &existing_st) == 0);
@@ -5599,6 +5668,9 @@ static int op_extract(const Config& cfg) {
                     }
                 }
             }
+
+            // --recursive-unlink: empty existing hierarchy (or remove non-dir) first
+            recursive_unlink_prepare(dpath, cfg);
 
             struct stat existing_st{};
             bool path_exists = (::lstat(dpath.c_str(), &existing_st) == 0);
@@ -6095,7 +6167,8 @@ static int op_append(const Config& cfg) {
     int exit_code = EXIT_SUCCESS;
     for (const auto& f : cfg.files) {
         if (cfg.verbose) print("{}\n", f);
-        if (!writer.add_path(f, f, cfg)) exit_code = EXIT_FAILURE;
+        if (!writer.add_path(f, f, cfg) && !cfg.ignore_failed_read)
+            exit_code = EXIT_FAILURE;
     }
     writer.finish();
     s.close();

@@ -191,6 +191,65 @@ echo "[P8-06 compressed remote]"
   fi
 }
 
+# ── P8-07: --ignore-failed-read ───────────────────────────────────────────────
+echo "[P8-07 --ignore-failed-read]"
+{
+  D="$TMPBASE/ifr"
+  mkdir -p "$D/src"
+  echo ok > "$D/src/good.txt"
+  echo secret > "$D/src/bad.txt"
+  chmod 000 "$D/src/bad.txt"
+  # Without flag: create must fail (nonzero)
+  "$MUTAR" -cf "$D/fail.tar" -C "$D/src" good.txt bad.txt 2>"$D/noflag.err"
+  rc_no=$?
+  # With flag: create succeeds; good.txt present; bad.txt absent or empty
+  "$MUTAR" -cf "$D/ok.tar" --ignore-failed-read -C "$D/src" good.txt bad.txt 2>"$D/flag.err"
+  rc_yes=$?
+  members=$("$MUTAR" -tf "$D/ok.tar" 2>/dev/null || true)
+  chmod 644 "$D/src/bad.txt" 2>/dev/null || true
+  if [ "$rc_no" -ne 0 ] && [ "$rc_yes" -eq 0 ] && echo "$members" | grep -q 'good\.txt'; then
+    pass "P8-07: --ignore-failed-read exits 0; without flag fails; good.txt archived"
+  else
+    fail "P8-07" "rc_no=$rc_no rc_yes=$rc_yes members=$members; noflag=$(head -c 120 "$D/noflag.err"); flag=$(head -c 120 "$D/flag.err")"
+  fi
+}
+
+# ── P8-08: --recursive-unlink ─────────────────────────────────────────────────
+echo "[P8-08 --recursive-unlink]"
+{
+  D="$TMPBASE/ru"
+  mkdir -p "$D/src/d" "$D/out/d"
+  echo new > "$D/src/d/new.txt"
+  echo a > "$D/src/a.txt"
+  echo old > "$D/out/d/old.txt"
+  echo keep > "$D/out/keep.txt"
+  if ! "$MUTAR" -cf "$D/a.tar" -C "$D/src" d a.txt 2>"$D/c.err"; then
+    fail "P8-08" "create failed: $(cat "$D/c.err")"
+  else
+    if ! "$MUTAR" -xf "$D/a.tar" --recursive-unlink -C "$D/out" 2>"$D/x.err"; then
+      fail "P8-08" "extract failed: $(cat "$D/x.err")"
+    elif [ -e "$D/out/d/old.txt" ]; then
+      fail "P8-08" "old.txt still present under emptied hierarchy"
+    elif [ ! -f "$D/out/d/new.txt" ]; then
+      fail "P8-08" "new.txt missing after extract"
+    elif [ ! -f "$D/out/keep.txt" ]; then
+      fail "P8-08" "sibling keep.txt was removed"
+    else
+      pass "P8-08: --recursive-unlink empties dir hierarchy before extract"
+    fi
+    # Non-directory blocking a directory member is removed
+    mkdir -p "$D/out2"
+    echo file > "$D/out2/d"
+    if ! "$MUTAR" -xf "$D/a.tar" --recursive-unlink -C "$D/out2" 2>"$D/x2.err"; then
+      fail "P8-08b" "extract over file-as-dir failed: $(cat "$D/x2.err")"
+    elif [ ! -d "$D/out2/d" ] || [ ! -f "$D/out2/d/new.txt" ]; then
+      fail "P8-08b" "expected directory d/new.txt after unlinking blocking file"
+    else
+      pass "P8-08b: --recursive-unlink removes non-dir blocking directory extract"
+    fi
+  fi
+}
+
 echo
 echo "=== phase8 residuals summary: $PASS passed, $FAIL failed, $SKIP skipped ==="
 [ "$FAIL" -eq 0 ]
