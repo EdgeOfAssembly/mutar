@@ -2341,49 +2341,195 @@ static std::string sanitize_path(std::string_view path, bool absolute_names) {
     return result;
 }
 
-/// Open a regular file for extract write without following symlinks.
-/// Prevents symlink-mediated zip-slip: archive places a symlink, then a
-/// regular member with the same name that would otherwise open(2) through
-/// the link and overwrite an arbitrary target.
-///
-/// Policy: if outpath is a symlink, unlink it first (unless --keep-old-files).
-/// Prefer O_NOFOLLOW; on ELOOP after a race, unlink and retry with O_EXCL.
-static int open_extract_regular(const std::string& outpath, const Config& cfg) {
 #ifdef O_NOFOLLOW
-    constexpr int k_nofollow = O_NOFOLLOW;
+static constexpr int k_extract_nofollow = O_NOFOLLOW;
 #else
-    constexpr int k_nofollow = 0;
+static constexpr int k_extract_nofollow = 0;
 #endif
 
+/// Split outpath into components. Sets *is_absolute if path begins with '/'.
+/// Empty, ".", and trailing slashes are dropped; ".." is kept as a component
+/// (caller should only see ".." when --absolute-names left it in place).
+static std::vector<std::string> split_extract_components(const std::string& path,
+                                                         bool* is_absolute) {
+    *is_absolute = !path.empty() && path.front() == '/';
+    std::vector<std::string> parts;
+    std::size_t start = *is_absolute ? 1 : 0;
+    while (start <= path.size()) {
+        auto end = path.find('/', start);
+        if (end == std::string::npos) end = path.size();
+        if (end > start) {
+            std::string part = path.substr(start, end - start);
+            if (part != ".")
+                parts.push_back(std::move(part));
+        }
+        if (end == path.size()) break;
+        start = end + 1;
+    }
+    return parts;
+}
+
+/// Open or create one directory component under dirfd without following a
+/// symlink at that component (unless keep_dir_symlink).
+/// @return directory fd on success (>=0), -1 on error (errno set).
+static int openat_dir_component(int dirfd, const std::string& name, const Config& cfg) {
+    int fd = ::openat(dirfd, name.c_str(),
+                      O_RDONLY | O_DIRECTORY | k_extract_nofollow);
+    if (fd >= 0) return fd;
+
+    if (errno == ENOENT) {
+        if (::mkdirat(dirfd, name.c_str(), 0777) < 0 && errno != EEXIST)
+            return -1;
+        return ::openat(dirfd, name.c_str(),
+                        O_RDONLY | O_DIRECTORY | k_extract_nofollow);
+    }
+
+    // Exists but not a real directory we can open with O_NOFOLLOW (symlink,
+    // file, or race). Inspect with AT_SYMLINK_NOFOLLOW.
     struct stat st{};
-    if (::lstat(outpath.c_str(), &st) == 0 && S_ISLNK(st.st_mode)) {
+    if (::fstatat(dirfd, name.c_str(), &st, AT_SYMLINK_NOFOLLOW) < 0)
+        return -1;
+
+    if (S_ISLNK(st.st_mode)) {
+        if (cfg.keep_dir_symlink) {
+            // GNU-like: extract through an existing directory symlink.
+            return ::openat(dirfd, name.c_str(), O_RDONLY | O_DIRECTORY);
+        }
         if (cfg.keep_old_files) {
             errno = EEXIST;
             return -1;
         }
-        if (::unlink(outpath.c_str()) < 0 && errno != ENOENT)
+        // Replace intermediate symlink so nested members cannot escape the tree.
+        if (::unlinkat(dirfd, name.c_str(), 0) < 0 && errno != ENOENT)
             return -1;
+        if (::mkdirat(dirfd, name.c_str(), 0777) < 0 && errno != EEXIST)
+            return -1;
+        return ::openat(dirfd, name.c_str(),
+                        O_RDONLY | O_DIRECTORY | k_extract_nofollow);
     }
 
-    int flags = O_WRONLY | O_CREAT | O_TRUNC | k_nofollow;
-    int fd = ::open(outpath.c_str(), flags, 0666);
-    if (fd >= 0) return fd;
+    if (S_ISDIR(st.st_mode)) {
+        // Directory without O_NOFOLLOW success is unexpected; try plain open.
+        return ::openat(dirfd, name.c_str(), O_RDONLY | O_DIRECTORY);
+    }
 
-    // Symlink race or O_NOFOLLOW rejection: unlink link and recreate exclusively.
-    if (errno == ELOOP || errno == EEXIST) {
-        if (cfg.keep_old_files) return -1;
-        if (::lstat(outpath.c_str(), &st) == 0 && S_ISLNK(st.st_mode)) {
-            if (::unlink(outpath.c_str()) < 0 && errno != ENOENT)
-                return -1;
-            flags = O_WRONLY | O_CREAT | O_EXCL | k_nofollow;
-            fd = ::open(outpath.c_str(), flags, 0666);
-            if (fd >= 0) return fd;
-            // Last resort after unlink: truncate create without following links.
-            flags = O_WRONLY | O_CREAT | O_TRUNC | k_nofollow;
-            return ::open(outpath.c_str(), flags, 0666);
+    errno = ENOTDIR;
+    return -1;
+}
+
+/// Walk parent components of outpath with openat(O_NOFOLLOW), creating real
+/// directories and replacing intermediate symlinks (unless keep_dir_symlink).
+/// On success, *out_dirfd is the directory fd for the final component's parent
+/// (AT_FDCWD if no parent). Caller must close *out_dirfd when != AT_FDCWD.
+/// *out_base is the final path component.
+/// @return 0 on success, -1 on error.
+static int walk_extract_parent(const std::string& outpath, const Config& cfg,
+                               int* out_dirfd, std::string* out_base) {
+    bool abs = false;
+    auto parts = split_extract_components(outpath, &abs);
+    if (parts.empty()) {
+        errno = EINVAL;
+        return -1;
+    }
+    *out_base = parts.back();
+
+    int dirfd = AT_FDCWD;
+    std::vector<int> owned; // fds we must close on failure or when superseded
+    auto fail = [&]() {
+        for (int fd : owned) ::close(fd);
+        return -1;
+    };
+    auto adopt = [&](int fd) {
+        if (fd != AT_FDCWD) owned.push_back(fd);
+        dirfd = fd;
+    };
+
+    if (abs) {
+        int rootfd = ::open("/", O_RDONLY | O_DIRECTORY);
+        if (rootfd < 0) return -1;
+        adopt(rootfd);
+    }
+
+    for (std::size_t i = 0; i + 1 < parts.size(); ++i) {
+        int next = openat_dir_component(dirfd, parts[i], cfg);
+        if (next < 0) return fail();
+        // Close previous owned dirfds; keep only `next`.
+        for (int fd : owned) ::close(fd);
+        owned.clear();
+        adopt(next);
+    }
+
+    *out_dirfd = dirfd;
+    // Transfer ownership of dirfd to caller (remove from owned without close).
+    owned.clear();
+    return 0;
+}
+
+/// Ensure parent directories of outpath exist as real directories.
+/// Intermediate symlinks are replaced (unless --keep-directory-symlink).
+/// @return 0 on success, -1 on error.
+static int ensure_parent_dirs_nofollow(const std::string& outpath, const Config& cfg) {
+    int dirfd = AT_FDCWD;
+    std::string base;
+    if (walk_extract_parent(outpath, cfg, &dirfd, &base) < 0)
+        return -1;
+    if (dirfd != AT_FDCWD) ::close(dirfd);
+    return 0;
+}
+
+/// Open a regular file for extract write without following any symlink in the
+/// path. Covers:
+///  - same-name: symlink member then regular member (final O_NOFOLLOW + unlink)
+///  - intermediate: dir symlink then nested regular (openat walk, replace link)
+///
+/// Policy: intermediate symlinks are replaced with real directories unless
+/// --keep-directory-symlink. Final symlink is unlinked unless --keep-old-files.
+static int open_extract_regular(const std::string& outpath, const Config& cfg) {
+    int dirfd = AT_FDCWD;
+    std::string base;
+    if (walk_extract_parent(outpath, cfg, &dirfd, &base) < 0)
+        return -1;
+
+    auto close_dir = [&]() {
+        if (dirfd != AT_FDCWD) ::close(dirfd);
+    };
+
+    struct stat st{};
+    if (::fstatat(dirfd, base.c_str(), &st, AT_SYMLINK_NOFOLLOW) == 0 && S_ISLNK(st.st_mode)) {
+        if (cfg.keep_old_files) {
+            errno = EEXIST;
+            close_dir();
+            return -1;
+        }
+        if (::unlinkat(dirfd, base.c_str(), 0) < 0 && errno != ENOENT) {
+            close_dir();
+            return -1;
         }
     }
-    return -1;
+
+    int flags = O_WRONLY | O_CREAT | O_TRUNC | k_extract_nofollow;
+    int fd = ::openat(dirfd, base.c_str(), flags, 0666);
+    if (fd < 0 && (errno == ELOOP || errno == EEXIST)) {
+        if (cfg.keep_old_files) {
+            close_dir();
+            return -1;
+        }
+        if (::fstatat(dirfd, base.c_str(), &st, AT_SYMLINK_NOFOLLOW) == 0 && S_ISLNK(st.st_mode)) {
+            if (::unlinkat(dirfd, base.c_str(), 0) < 0 && errno != ENOENT) {
+                close_dir();
+                return -1;
+            }
+            flags = O_WRONLY | O_CREAT | O_EXCL | k_extract_nofollow;
+            fd = ::openat(dirfd, base.c_str(), flags, 0666);
+            if (fd < 0) {
+                flags = O_WRONLY | O_CREAT | O_TRUNC | k_extract_nofollow;
+                fd = ::openat(dirfd, base.c_str(), flags, 0666);
+            }
+        }
+    }
+
+    close_dir();
+    return fd;
 }
 
 /// RAII unlink of a temp path (materialized seek view).
@@ -3832,14 +3978,14 @@ static int op_extract(const Config& cfg) {
             }
         }
 
-        // Create parent directories
-        {
-            namespace fs = std::filesystem;
-            fs::path p(outpath);
-            if (p.has_parent_path()) {
-                std::error_code ec;
-                fs::create_directories(p.parent_path(), ec);
-            }
+        // Create parent directories without following intermediate symlinks
+        // (dir-symlink zip-slip: archive "d"→outside then "d/evil" regular).
+        if (ensure_parent_dirs_nofollow(outpath, cfg) < 0) {
+            print(stderr, "mutar: {}: cannot create parent directories: {}\n",
+                  outpath, std::strerror(errno));
+            reader.skip_entry(e);
+            exit_code = EXIT_FAILURE;
+            continue;
         }
 
         switch (e.typeflag) {

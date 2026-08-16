@@ -111,6 +111,45 @@ echo "[T-SAFE-02] relative symlink zip-slip"
   fi
 }
 
+# ── T-SAFE-04: directory symlink then nested regular must not escape ──────────
+echo "[T-SAFE-04] intermediate directory symlink zip-slip"
+{
+  D="$TMPBASE/dirslip"
+  mkdir -p "$D/stage" "$D/extract" "$D/outside"
+  printf 'safe-dir\n' >"$D/outside/keep"
+  (
+    cd "$D/stage" || exit 1
+    ln -s "$D/outside" d
+    "$MUTAR" -cf "$D/a.tar" d 2>/dev/null
+    rm -f d
+    mkdir -p d
+    printf 'pwned-dir\n' >d/evil
+    "$MUTAR" -rf "$D/a.tar" d/evil 2>/dev/null
+  )
+
+  "$MUTAR" -xf "$D/a.tar" -C "$D/extract" 2>"$D/x.err"
+  rc_x=$?
+  outside_evil="$D/outside/evil"
+  keep_now=$(cat "$D/outside/keep" 2>/dev/null || echo '')
+
+  if [ -f "$outside_evil" ]; then
+    fail "T-SAFE-04" "WROTE OUTSIDE via dir symlink: $(cat "$outside_evil"); rc=$rc_x"
+  elif [ "$keep_now" != "safe-dir" ]; then
+    fail "T-SAFE-04" "outside/keep corrupted: '$keep_now'"
+  elif [ -f "$D/extract/d/evil" ] && [ ! -L "$D/extract/d" ]; then
+    # Intermediate symlink replaced with real dir; payload in-tree
+    if grep -qx 'pwned-dir' "$D/extract/d/evil" 2>/dev/null; then
+      pass "T-SAFE-04: no outside write; d is real dir with evil (rc=$rc_x)"
+    else
+      pass "T-SAFE-04: no outside write; in-tree extract present (rc=$rc_x)"
+    fi
+  elif [ ! -e "$outside_evil" ]; then
+    pass "T-SAFE-04: no outside write (rc=$rc_x, extract layout may vary)"
+  else
+    fail "T-SAFE-04" "unexpected state; err=$(head -c 200 "$D/x.err")"
+  fi
+}
+
 # ── T-SAFE-03: make_volume_name must not treat % as printf format ─────────────
 echo "[T-SAFE-03] volume name with percent (no format-string crash)"
 {

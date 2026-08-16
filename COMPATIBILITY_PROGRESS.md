@@ -476,11 +476,12 @@ When built with `MUTAR_HAVE_XATTR` / `MUTAR_HAVE_ACL` (CMake detection):
   after the file/dir is created. Restore also skips privileged xattr namespaces.
   Without the flag, SCHILY records are ignored.
 - **SELinux (G9)**: still unsupported; `--selinux` no-op + warning; never stored.
-- **Extract open safety**: regular-file extract uses `O_NOFOLLOW` and unlinks a
-  pre-existing symlink at the outpath before write (symlink-mediated zip-slip).
-  PAX numeric fields (`stoll`/`stod`) are try/catch-guarded. Materialize temp
-  uses RAII unlink. `make_volume_name` substitutes the first `%d` without
-  printf format strings.
+- **Extract open safety**: path walk via `openat`/`mkdirat` with `O_NOFOLLOW`;
+  intermediate directory symlinks are replaced with real dirs (unless
+  `--keep-directory-symlink`); final-component symlink is unlinked before
+  regular write (same-name and dir-nested zip-slip). PAX numeric fields
+  (`stoll`/`stod`) are try/catch-guarded. Materialize temp uses RAII unlink.
+  `make_volume_name` substitutes the first `%d` without printf format strings.
 
 Tests: `tests/test_xattrs_acls.sh` (CTest `mutar_xattrs_acls_tests`); skips when
 libs/tools/FS lack support. Extract safety: `tests/test_extract_safety.sh`
