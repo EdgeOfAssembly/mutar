@@ -493,7 +493,18 @@ In `op_extract`'s `DIRTYPE` case, if the target path already exists:
 | `--mutar-index=FILE` | ✅ | Explicit path for write/read |
 | Fast `-t` via index | ✅ | Non-verbose list from sidecar |
 | Seek extract | ✅ | Uncompressed seekable archives; selective members |
-| Compressed seek | ❌ | Deferred to Phase 6 |
+| Compressed seek | ✅ | Phase 6: materialize-then-seek with index |
+
+## Phase 6 — Seekable compression (2026-08-16)
+
+| Feature | Status | Notes |
+|---------|--------|-------|
+| `--seekable` | ✅ | Implies `--write-index` |
+| xz multi-block write | ✅ | `--block-size=1MiB` |
+| zstd chunked write | ✅ | `-T0 -B1M` |
+| gzip/bzip2 seek | ⚠️ | Warns; materialize-then-seek still works with index |
+| Compressed selective extract | ✅ | Materialize once + index seek |
+| True frame-level seek without materialize | ❌ | Future (liblzma/libzstd APIs) |
 
 ## Known Remaining Gaps
 

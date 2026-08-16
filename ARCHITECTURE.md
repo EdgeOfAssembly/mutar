@@ -419,4 +419,15 @@ Optional `MUTAR.INDEX.V1` sidecar (`ARCHIVE.mutaridx` or `--mutar-index=PATH`):
 - **Extract:** selective extract on a seekable uncompressed stream seeks to each
   member via `ArchiveReader::seek_to_byte` (`MUTAR_DEBUG_SEEK=1` logs seeks).
 - **Compat:** archive bytes unchanged — GNU tar ignores the sidecar.
-- **Limit:** solid compressed archives are not randomly seekable (Phase 6).
+- **Limit (pre-Phase 6):** solid compressed streams are pipes (not seekable in place).
+
+## Seekable compression (Phase 6)
+
+`--seekable` (implies `--write-index`):
+
+- **Write:** `xz --block-size=1MiB`, `zstd -T0 -B1M`; gzip/bzip2 warn (solid).
+- **Read:** if index + named extract and stream is a decompress pipe,
+  `ArchiveStream::materialize_seekable` copies decompressed bytes to a temp file,
+  then Phase-5 `seek_to_byte` applies.
+- **Interop:** compressed archives remain readable by GNU tar.
+- **Not yet:** true frame-level seek without materialize (needs liblzma/libzstd APIs).
