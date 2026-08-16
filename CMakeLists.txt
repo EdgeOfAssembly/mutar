@@ -184,6 +184,13 @@ add_test(
   WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
 )
 
+# Sidecar index + seek (Phase 5)
+add_test(
+  NAME mutar_index_seek_tests
+  COMMAND bash ${CMAKE_SOURCE_DIR}/tests/test_index_seek.sh $<TARGET_FILE:mutar>
+  WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+)
+
 # Boundary / overflow / memory tests binary
 # Compiled with AddressSanitizer + UndefinedBehaviorSanitizer so any OOB
 # access, integer overflow, use-after-free, etc. are caught at runtime.

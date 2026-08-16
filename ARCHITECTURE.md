@@ -407,3 +407,16 @@ The `print_usage()` function was rewritten from a short stub to enumerate all
 ~100 parsed options, grouped by 13 categories (Main operations, Compression,
 Format, File selection, Extraction, Attributes, Informational, Compatibility).
 This matches the information density of `tar --help` in GNU tar 1.35.
+
+
+## Sidecar index (Phase 5)
+
+Optional `MUTAR.INDEX.V1` sidecar (`ARCHIVE.mutaridx` or `--mutar-index=PATH`):
+
+- **Create:** `--write-index` or `--mutar-index=PATH` collects `IndexEntry` while writing
+  (byte offset of first header block per member in the uncompressed stream).
+- **List:** non-verbose `-t` loads the sidecar when present (no archive scan).
+- **Extract:** selective extract on a seekable uncompressed stream seeks to each
+  member via `ArchiveReader::seek_to_byte` (`MUTAR_DEBUG_SEEK=1` logs seeks).
+- **Compat:** archive bytes unchanged — GNU tar ignores the sidecar.
+- **Limit:** solid compressed archives are not randomly seekable (Phase 6).

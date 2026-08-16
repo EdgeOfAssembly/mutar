@@ -274,7 +274,9 @@ struct Config {
     bool   compat_o            = false;  // -o compat
     int    checkpoint          = 0;      // --checkpoint[=N]
     std::string checkpoint_action;       // --checkpoint-action
-    std::string index_file;              // --index-file
+    std::string index_file;              // --index-file (GNU: verbose routing)
+    std::string mutar_index;             // --mutar-index=PATH (sidecar index R/W)
+    bool        write_index = false;     // --write-index (create sidecar *.mutaridx)
     std::string starting_file;           // -K / --starting-file
     std::vector<std::string> exclude_from; // -X / --exclude-from (filenames)
     bool   anchored            = false;  // --anchored/--no-anchored (GNU tar default: --no-anchored)
@@ -312,6 +314,21 @@ struct Config {
     std::vector<std::string> exclude_tags_under;  // --exclude-tag-under=FILE
     std::string backup_control;                   // --backup[=CONTROL]
     std::string backup_suffix = "~";              // --suffix=STRING
+};
+
+// ── Sidecar archive index (MUTAR.INDEX.V1) ─────────────────────────────────────
+// Optional; zero cost when unused. Offsets are byte positions in the
+// *uncompressed* tar stream (seek only works on seekable uncompressed archives).
+
+struct IndexEntry {
+    std::string  name;
+    std::uint64_t offset = 0;   // byte offset of first header block for this member
+    std::int64_t size    = 0;   // logical / archived size from header
+    char         typeflag = REGTYPE;
+    std::int64_t mtime   = 0;
+    unsigned     mode    = 0;
+    unsigned     uid     = 0;
+    unsigned     gid     = 0;
 };
 
 // ── In-memory tar entry ───────────────────────────────────────────────────────

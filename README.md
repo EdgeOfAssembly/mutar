@@ -6,7 +6,7 @@ It is **not** Jörg Schilling’s `star` (Schily tools).
 
 **Compatibility goal: ~99% with GNU tar 1.35** for common formats
 (v7, oldgnu, gnu, ustar, pax/posix) and the command-line interface in `tar(1)`.
-**SELinux is not supported** (no test hardware). Run `./mutar --help` for options.
+**SELinux is not supported** (no test hardware). Optional **sidecar index** (`--write-index` / `--mutar-index`) enables fast list and seek extract on uncompressed archives. Run `./mutar --help` for options.
 
 > See `COMPATIBILITY_PROGRESS.md` for an option-by-option audit and
 > `ARCHITECTURE.md` for design details. Campaign plan: `GOAL.md`.
@@ -63,6 +63,8 @@ mutar [OPTION...] [FILE...]
 | `-p` | Preserve file permissions |
 | `-k` | Don't overwrite existing files |
 | `-S` | Handle sparse files |
+| `--write-index` | Write sidecar member index (`ARCHIVE.mutaridx`) |
+| `--mutar-index=FILE` | Explicit index path (create/list/extract) |
 | `-H FORMAT` | Archive format: `v7` `oldgnu` `gnu` `ustar` `pax` |
 | `--strip-components=N` | Strip N leading components from paths on extract |
 | `--exclude=PATTERN` | Exclude files matching PATTERN |

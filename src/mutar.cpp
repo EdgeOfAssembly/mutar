@@ -368,6 +368,15 @@ public:
         return ::lseek(fd_, pos, whence);
     }
 
+    /// True when the underlying fd supports lseek and is not a compression pipe.
+    [[nodiscard]] bool is_seekable() const noexcept {
+        if (fd_ < 0) return false;
+        if (child_pid_ > 0) return false; // decompressor/compressor pipe
+        errno = 0;
+        off_t cur = ::lseek(fd_, 0, SEEK_CUR);
+        return cur != static_cast<off_t>(-1);
+    }
+
     bool truncate_at(off_t pos) {
         return ::ftruncate(fd_, pos) == 0;
     }
@@ -435,6 +444,15 @@ public:
     std::int64_t block_no() const noexcept { return block_no_; }
     bool         eof()      const noexcept { return eof_; }
 
+    /// Reset buffer state after an lseek on the underlying stream.
+    /// @param absolute_block  next block number that will be read (0-based).
+    void reset_at_block(std::int64_t absolute_block) noexcept {
+        pos_      = 0;
+        used_     = 0;
+        eof_      = false;
+        block_no_ = absolute_block;
+    }
+
 private:
     bool fill(ArchiveStream& s) {
         ssize_t n = s.read_buf(buf_.data(), record_size_);
@@ -451,6 +469,114 @@ private:
     std::size_t      used_ = 0;
     std::int64_t     block_no_ = 0;
     bool             eof_  = false;
+};
+
+// ── Sidecar index (MUTAR.INDEX.V1) ─────────────────────────────────────────────
+
+/// Default sidecar path: archive path + ".mutaridx".
+static std::string default_mutaridx_path(const std::string& archive) {
+    if (archive.empty() || archive == "-") return {};
+    return archive + ".mutaridx";
+}
+
+/// Resolve index path for read/write from Config.
+static std::string resolve_mutaridx_path(const Config& cfg, bool for_write) {
+    if (!cfg.mutar_index.empty()) return cfg.mutar_index;
+    if (for_write && cfg.write_index) return default_mutaridx_path(cfg.archive_file);
+    if (!for_write) return default_mutaridx_path(cfg.archive_file);
+    return {};
+}
+
+class ArchiveIndex {
+public:
+    Result<void> load(const std::filesystem::path& path) {
+        entries_.clear();
+        by_name_.clear();
+        std::ifstream in(path);
+        if (!in) return std::unexpected(sys_error(path.string()));
+        std::string line;
+        if (!std::getline(in, line))
+            return std::unexpected(msg_error("empty index file"));
+        if (line != "MUTAR.INDEX.V1")
+            return std::unexpected(msg_error(
+                std::format("unsupported index magic: {}", line)));
+        while (std::getline(in, line)) {
+            if (line.empty() || line[0] == '#') continue;
+            // Wire format (TAB-separated, name last):
+            //   offset\tsize\ttypeflag\tmtime\tmode\tuid\tgid\tname
+            std::vector<std::string> fields;
+            std::size_t start = 0;
+            for (int i = 0; i < 7; ++i) {
+                auto tab = line.find('\t', start);
+                if (tab == std::string::npos) { fields.clear(); break; }
+                fields.push_back(line.substr(start, tab - start));
+                start = tab + 1;
+            }
+            if (fields.size() != 7) continue;
+            IndexEntry e;
+            try {
+                e.offset   = static_cast<std::uint64_t>(std::stoull(fields[0]));
+                e.size     = static_cast<std::int64_t>(std::stoll(fields[1]));
+                e.typeflag = fields[2].empty() ? REGTYPE : fields[2][0];
+                e.mtime    = static_cast<std::int64_t>(std::stoll(fields[3]));
+                e.mode     = static_cast<unsigned>(std::stoul(fields[4]));
+                e.uid      = static_cast<unsigned>(std::stoul(fields[5]));
+                e.gid      = static_cast<unsigned>(std::stoul(fields[6]));
+            } catch (...) {
+                continue;
+            }
+            e.name = line.substr(start);
+            if (e.name.empty()) continue;
+            by_name_[e.name] = entries_.size();
+            entries_.push_back(std::move(e));
+        }
+        return {};
+    }
+
+    Result<void> save(const std::filesystem::path& path) const {
+        std::ofstream out(path, std::ios::trunc);
+        if (!out) return std::unexpected(sys_error(path.string()));
+        out << "MUTAR.INDEX.V1\n";
+        for (const auto& e : entries_) {
+            // typeflag as single char; name last
+            char tf = e.typeflag ? e.typeflag : REGTYPE;
+            if (tf == AREGTYPE) tf = REGTYPE; // printable
+            out << e.offset << '\t' << e.size << '\t' << tf << '\t'
+                << e.mtime << '\t' << e.mode << '\t' << e.uid << '\t' << e.gid
+                << '\t' << e.name << '\n';
+        }
+        if (!out) return std::unexpected(msg_error("failed writing index"));
+        return {};
+    }
+
+    void add(IndexEntry e) {
+        by_name_[e.name] = entries_.size();
+        entries_.push_back(std::move(e));
+    }
+
+    [[nodiscard]] std::optional<IndexEntry> find(std::string_view name) const {
+        auto it = by_name_.find(std::string(name));
+        if (it == by_name_.end()) {
+            // try with/without trailing slash for directories
+            std::string alt(name);
+            if (!alt.empty() && alt.back() == '/') {
+                alt.pop_back();
+                it = by_name_.find(alt);
+            } else {
+                alt.push_back('/');
+                it = by_name_.find(alt);
+            }
+            if (it == by_name_.end()) return std::nullopt;
+        }
+        return entries_[it->second];
+    }
+
+    [[nodiscard]] const std::vector<IndexEntry>& all() const noexcept { return entries_; }
+    [[nodiscard]] bool empty() const noexcept { return entries_.empty(); }
+
+private:
+    std::vector<IndexEntry> entries_;
+    std::map<std::string, std::size_t> by_name_;
 };
 
 // ── Header decode/encode ──────────────────────────────────────────────────────
@@ -1062,6 +1188,21 @@ public:
 
     std::int64_t block_no() const { return buf_.block_no(); }
 
+    /// Seek to an absolute byte offset in a seekable archive and reset the block buffer.
+    /// @return false if the stream is not seekable or lseek fails.
+    bool seek_to_byte(std::uint64_t offset) {
+        if (!stream_.is_seekable()) return false;
+        if (offset % BLOCKSIZE != 0) {
+            print(stderr, "mutar: index offset {} is not block-aligned\n", offset);
+            return false;
+        }
+        if (stream_.seek(static_cast<off_t>(offset), SEEK_SET) < 0) return false;
+        buf_.reset_at_block(static_cast<std::int64_t>(offset / BLOCKSIZE));
+        if (std::getenv("MUTAR_DEBUG_SEEK"))
+            print(stderr, "mutar: seek_to_byte offset={}\n", offset);
+        return true;
+    }
+
     // Sparse extraction: distribute concatenated archive segments to correct file offsets.
     bool extract_sparse_data(const Entry& e, int out_fd) {
         if (e.sparse_map.empty()) { read_entry_data(e, out_fd); return true; }
@@ -1208,6 +1349,9 @@ public:
         owner_map_ = om; group_map_ = gm;
     }
 
+    /// Enable sidecar index collection (pointer owned by caller).
+    void set_index(ArchiveIndex* idx) { index_ = idx; }
+
     // Write two EOF blocks + flush
     void finish() {
         Block zero{};
@@ -1315,6 +1459,22 @@ public:
     std::int64_t block_no() const { return buf_.block_no(); }
 
 private:
+    /// Record a member in the sidecar index at the current write position
+    /// (before any LongName/PAX extension headers for this member).
+    void record_index_entry(const Entry& e) {
+        if (!index_) return;
+        IndexEntry ie;
+        ie.name     = e.name;
+        ie.offset   = static_cast<std::uint64_t>(buf_.block_no()) * BLOCKSIZE;
+        ie.size     = e.is_sparse ? e.real_size : e.size;
+        ie.typeflag = e.typeflag ? e.typeflag : REGTYPE;
+        ie.mtime    = e.mtime;
+        ie.mode     = e.mode;
+        ie.uid      = e.uid;
+        ie.gid      = e.gid;
+        index_->add(std::move(ie));
+    }
+
     // Write a GNU LongName or LongLink extension record
     void write_long_ext(char type, std::string_view longname) {
         Entry meta;
@@ -1374,6 +1534,7 @@ private:
 
 public:
     bool write_header_only(Entry& e, const Config& cfg) {
+        record_index_entry(e);
         maybe_write_extensions(e, cfg);
         Block hblk = encode_header(e, cfg);
         buf_.write_block(stream_, hblk);
@@ -1411,6 +1572,7 @@ private:
 
     bool write_regular(Entry& e, const std::string& fspath,
                        const Config& cfg, const struct stat& st) {
+        record_index_entry(e);
         maybe_write_extensions(e, cfg);
         Block hblk = encode_header(e, cfg);
         buf_.write_block(stream_, hblk);
@@ -1481,6 +1643,14 @@ private:
         e.sparse_map.clear();
         for (auto& seg : segs)
             e.sparse_map.push_back(SparseMap{seg.offset, seg.length});
+
+        // Index before any extension/header blocks for this member.
+        {
+            Entry idx_e = e;
+            idx_e.size = logical_size;
+            idx_e.typeflag = GNUTYPE_SPARSE;
+            record_index_entry(idx_e);
+        }
 
         // GNU sparse format using PAX extended header (GNU extensions within PAX 'x' header)
         if (fmt_ == Format::PAX) {
@@ -1703,6 +1873,7 @@ private:
     Format         fmt_;
     const std::map<std::string,std::string>* owner_map_ = nullptr;
     const std::map<std::string,std::string>* group_map_ = nullptr;
+    ArchiveIndex*  index_ = nullptr;
 };
 
 // ── Path utilities ────────────────────────────────────────────────────────────
@@ -2169,6 +2340,47 @@ static void print_verbose(const Entry& e, const Config& cfg,
 // ── list (-t) ─────────────────────────────────────────────────────────────────
 
 static int op_list(const Config& cfg) {
+    // Fast path: list from sidecar index without scanning the archive.
+    // Used when --mutar-index is set or ARCHIVE.mutaridx exists.
+    // Verbose mode still falls through to sequential scan for full metadata.
+    if (!cfg.verbose) {
+        std::string idx_path = resolve_mutaridx_path(cfg, false);
+        if (!cfg.mutar_index.empty() ||
+            (!idx_path.empty() && std::filesystem::exists(idx_path))) {
+            if (!idx_path.empty() && std::filesystem::exists(idx_path)) {
+                ArchiveIndex aidx;
+                auto lr = aidx.load(idx_path);
+                if (lr) {
+                    std::set<std::string> want;
+                    for (const auto& f : cfg.files) want.insert(normalize_member(f));
+                    std::int64_t total_bytes = 0;
+                    for (const auto& ie : aidx.all()) {
+                        std::string display_name = ie.name;
+                        if (!cfg.transform_expr.empty())
+                            display_name = apply_transform(display_name, cfg.transform_expr);
+                        if (cfg.strip_components > 0) {
+                            display_name = strip_components(display_name, cfg.strip_components);
+                            if (display_name.empty()) continue;
+                        }
+                        if (!want.empty() && !want.contains(ie.name) &&
+                            !want.contains(display_name) &&
+                            !want.contains(normalize_member(ie.name)))
+                            continue;
+                        if (cfg.block_number)
+                            print("{}: ", ie.offset / BLOCKSIZE);
+                        print("{}\n", display_name);
+                        total_bytes += ie.size;
+                    }
+                    if (cfg.totals)
+                        print(stderr, "Total bytes listed: {}\n", total_bytes);
+                    return EXIT_SUCCESS;
+                }
+                print(stderr, "mutar: warning: cannot load index '{}': {}; scanning archive\n",
+                      idx_path, lr.error().message);
+            }
+        }
+    }
+
     auto res = ArchiveStream::open_read(cfg);
     if (!res) {
         print(stderr, "mutar: {}\n", res.error().message);
@@ -2270,6 +2482,12 @@ static int op_create(const Config& cfg) {
     if (cfg.old_archive) fmt = Format::V7;
 
     ArchiveWriter writer(s, cfg.blocking_factor, fmt);
+
+    // Optional sidecar index collection (--write-index / --mutar-index on create)
+    ArchiveIndex create_index;
+    const bool collect_index = cfg.write_index || !cfg.mutar_index.empty();
+    if (collect_index)
+        writer.set_index(&create_index);
 
     // Volume label
     if (!cfg.label.empty()) {
@@ -2478,6 +2696,25 @@ static int op_create(const Config& cfg) {
     total_bytes = writer.block_no() * static_cast<std::int64_t>(BLOCKSIZE);
     s.close();
 
+    // Write sidecar index (MUTAR.INDEX.V1) after archive is complete
+    if (collect_index && exit_code == EXIT_SUCCESS) {
+        std::string idx_path = resolve_mutaridx_path(cfg, true);
+        if (idx_path.empty()) {
+            print(stderr, "mutar: cannot determine index path (need -f ARCHIVE)\n");
+            exit_code = EXIT_FAILURE;
+        } else {
+            auto sr = create_index.save(idx_path);
+            if (!sr) {
+                print(stderr, "mutar: cannot write index '{}': {}\n",
+                      idx_path, sr.error().message);
+                exit_code = EXIT_FAILURE;
+            } else if (cfg.verbose) {
+                print(stderr, "mutar: wrote index {} ({} members)\n",
+                      idx_path, create_index.all().size());
+            }
+        }
+    }
+
     // Write/update incremental snapshot file
     if (!cfg.listed_incremental.empty() && exit_code == EXIT_SUCCESS) {
         // Merge archived entries into existing snapshot (for level >= 1 incremental)
@@ -2594,6 +2831,25 @@ static int op_extract(const Config& cfg) {
     std::set<std::string> want;
     for (const auto& f : cfg.files) want.insert(normalize_member(f));
 
+    // Optional sidecar index for selective extract via seek
+    ArchiveIndex extract_index;
+    bool have_index = false;
+    {
+        std::string idx_path = resolve_mutaridx_path(cfg, false);
+        if (!idx_path.empty() && std::filesystem::exists(idx_path)) {
+            auto lr = extract_index.load(idx_path);
+            if (lr) {
+                have_index = true;
+            } else if (!cfg.mutar_index.empty()) {
+                print(stderr, "mutar: warning: cannot load index '{}': {}\n",
+                      idx_path, lr.error().message);
+            }
+        } else if (!cfg.mutar_index.empty()) {
+            print(stderr, "mutar: warning: index '{}' not found; sequential extract\n",
+                  cfg.mutar_index);
+        }
+    }
+
     if (!cfg.directory.empty()) {
         if (::chdir(cfg.directory.c_str()) < 0) {
             print(stderr, "mutar: -C {}: {}\n", cfg.directory, std::strerror(errno));
@@ -2632,9 +2888,45 @@ static int op_extract(const Config& cfg) {
     std::map<std::string, int> occurrence_map;
     int extract_vol_num = 1;
 
+    // Seek-based selective extract when index + seekable stream + named members.
+    std::vector<IndexEntry> seek_queue;
+    bool use_index_seek = false;
+    std::size_t seek_qi = 0;
+    if (have_index && !want.empty() && s.is_seekable()) {
+        for (const auto& ie : extract_index.all()) {
+            std::string n = normalize_member(ie.name);
+            if (want.contains(ie.name) || want.contains(n))
+                seek_queue.push_back(ie);
+        }
+        std::ranges::sort(seek_queue, [](const IndexEntry& a, const IndexEntry& b) {
+            return a.offset < b.offset;
+        });
+        use_index_seek = !seek_queue.empty();
+    }
+
     for (;;) {
+        if (use_index_seek) {
+            if (seek_qi >= seek_queue.size()) break;
+            if (!reader.seek_to_byte(seek_queue[seek_qi].offset)) {
+                print(stderr, "mutar: seek to offset {} failed; falling back to sequential\n",
+                      seek_queue[seek_qi].offset);
+                use_index_seek = false;
+                // Restart sequential from beginning of archive
+                if (!reader.seek_to_byte(0)) {
+                    print(stderr, "mutar: cannot rewind archive after failed seek\n");
+                    exit_code = EXIT_FAILURE;
+                    break;
+                }
+                seek_qi = 0;
+                // fall through to sequential next_entry
+            } else {
+                ++seek_qi;
+            }
+        }
+
         auto [e, ok, eof] = reader.next_entry();
         if (eof) {
+            if (use_index_seek) break; // done with seek queue
             // Multi-volume: on EOF, prompt for next volume
             if (cfg.multi_volume) {
                 ++extract_vol_num;
@@ -3404,6 +3696,8 @@ enum LongOptVal : int {
     OPT_VERIFY,
     OPT_CHECK_LINKS,
     OPT_INDEX_FILE,
+    OPT_WRITE_INDEX,
+    OPT_MUTAR_INDEX,
     OPT_RESTRICT,
     OPT_SPARSE,
     OPT_INTERACTIVE,
@@ -3609,6 +3903,8 @@ static const struct option long_opts[] = {
     {"utc",              no_argument,       nullptr, OPT_UTC},
     {"full-time",        no_argument,       nullptr, OPT_FULL_TIME},
     {"index-file",       required_argument, nullptr, OPT_INDEX_FILE},
+    {"write-index",      no_argument,       nullptr, OPT_WRITE_INDEX},
+    {"mutar-index",      required_argument, nullptr, OPT_MUTAR_INDEX},
     {"show-omitted-dirs",no_argument,       nullptr, OPT_SHOW_OMITTED_DIRS},
     {"show-transformed-names",no_argument,  nullptr, OPT_SHOW_TRANSFORMED},
     {"show-stored-names",no_argument,       nullptr, OPT_SHOW_TRANSFORMED},
@@ -3958,6 +4254,12 @@ static Config parse_args(int argc, char* argv[]) {
         case OPT_NO_NULL:            cfg.null_terminated = false; break;
 
         case OPT_INDEX_FILE:         cfg.index_file = ::optarg; break;
+        case OPT_WRITE_INDEX:        cfg.write_index = true; break;
+        case OPT_MUTAR_INDEX:
+            // Explicit path for create (write) and list/extract (read).
+            // Presence of mutar_index alone enables index write on create.
+            cfg.mutar_index = ::optarg ? ::optarg : "";
+            break;
         case OPT_EXCLUDE_FROM:       cfg.exclude_from.emplace_back(::optarg); break;
         case OPT_COMPRESS:           cfg.compress = Compress::CompressZ; break;
         case OPT_NO_RECURSION:       cfg.no_recursion = true; break;
@@ -4271,6 +4573,8 @@ static void print_usage(const char* prog) {
         "      --checkpoint-action=ACTION  Execute ACTION on each checkpoint\n"
         "      --full-time                 Print file time to its full resolution\n"
         "      --index-file=FILE           Send verbose output to FILE\n"
+        "      --write-index               Write sidecar member index (ARCHIVE.mutaridx) on create\n"
+        "      --mutar-index=FILE          Sidecar index path (create write / list+extract read)\n"
         "      --no-quote-chars=STRING     Disable quoting for characters from STRING\n"
         "      --quote-chars=STRING        Additionally quote characters from STRING\n"
         "      --quoting-style=STYLE       Set name quoting style\n"

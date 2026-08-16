@@ -485,6 +485,16 @@ In `op_extract`'s `DIRTYPE` case, if the target path already exists:
 
 ---
 
+## Phase 5 — Sidecar index + seek (2026-08-16)
+
+| Feature | Status | Notes |
+|---------|--------|-------|
+| `--write-index` | ✅ | Writes `ARCHIVE.mutaridx` (`MUTAR.INDEX.V1`) |
+| `--mutar-index=FILE` | ✅ | Explicit path for write/read |
+| Fast `-t` via index | ✅ | Non-verbose list from sidecar |
+| Seek extract | ✅ | Uncompressed seekable archives; selective members |
+| Compressed seek | ❌ | Deferred to Phase 6 |
+
 ## Known Remaining Gaps
 
 The following features are accepted by the CLI parser but are not (or not
