@@ -179,10 +179,36 @@ enum class Compress {
 
 // ── Config: parsed CLI options ────────────────────────────────────────────────
 
-/// Parsed --pax-option rules applied when writing PAX extended headers.
-/// MVP: only `delete=KEYWORD` (suppress emission of that keyword).
+/// Parsed --pax-option rules (GNU tar 1.35 / pax -o compatible).
+/// Applied when writing and reading PAX extended headers.
 struct PaxOptionRules {
-    std::set<std::string> delete_keywords;  // delete=keyword
+    /// delete=PATTERN — POSIX fnmatch patterns suppressing keywords
+    std::vector<std::string> delete_patterns;
+
+    /// exthdr.name / globexthdr.name templates (%d %f %p %n %%)
+    std::string exthdr_name;        ///< empty → default %d/PaxHeaders/%f
+    std::string globexthdr_name;    ///< empty → $TMPDIR/GlobalHead.%n
+
+    bool        has_exthdr_mtime     = false;
+    std::int64_t exthdr_mtime        = 0;
+    bool        has_globexthdr_mtime = false;
+    std::int64_t globexthdr_mtime    = 0;
+
+    /// keyword=value  → global extended header ('g') records
+    std::vector<std::pair<std::string, std::string>> global_overrides;
+    /// keyword:=value → per-file extended header ('x') records
+    std::vector<std::pair<std::string, std::string>> file_overrides;
+
+    /// True if any rule was set (including delete patterns).
+    [[nodiscard]] bool any() const noexcept {
+        return !delete_patterns.empty()
+            || !exthdr_name.empty()
+            || !globexthdr_name.empty()
+            || has_exthdr_mtime
+            || has_globexthdr_mtime
+            || !global_overrides.empty()
+            || !file_overrides.empty();
+    }
 };
 
 struct Config {

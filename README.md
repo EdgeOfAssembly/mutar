@@ -28,7 +28,7 @@ Performance claims require published benchmarks; see `PROGRESS.md` Phase F.
 | SELinux | **Unsupported** (no-op + warning) |
 | Sidecar index | `--write-index` / `--mutar-index` |
 | Seek | Uncompressed direct `lseek`; compressed **materialize-then-seek** (`--seekable`) — not frame-level |
-| PAX options | `--pax-option delete=KEYWORD` on write |
+| PAX options | full `--pax-option` (delete=, exthdr.*, globexthdr.*, keyword=/:=) |
 | Multi-volume | Between-member `-M -L` + volno/info-script; **mid-file split partial** |
 | xattrs / ACLs | SCHILY PAX store/restore when host libs present |
 | Formal | `make verify` — path sanitize fixtures + CBMC |
@@ -208,7 +208,7 @@ Magic-byte auto-detection works on read even without `-a`.
 
 | Option | Status | Notes |
 |--------|--------|-------|
-| `--pax-option` | ⚠️ Partial | `delete=KEYWORD` applied on write; other keywords accepted silently |
+| `--pax-option` | ✅ Implemented | `delete=PATTERN`, `exthdr.name`/`mtime`, `globexthdr.name`/`mtime`, `keyword=`/`:=` overrides |
 | `--volno-file` | ✅ | Atomic read/write of current volume number |
 | `--check-device` / `--no-check-device` | ✅ | Config `check_device` (default on); snapshot V2 stores `st_dev`; re-archive when device changes |
 | `--info-script` / `--new-volume-script` | ✅ | Exec'd at volume boundary; TAR_ARCHIVE/TAR_VOLUME; non-zero fails |
@@ -235,7 +235,7 @@ Magic-byte auto-detection works on read even without `-a`.
 | Incremental backups (`-G -g`) | ✅ dumpdir + listed-incremental skip (see COMPATIBILITY_PROGRESS Phase 3) |
 | Remote tape (`--rsh/rmt-command`) | Bridge works; lseek over rmt / remote append not implemented |
 | Multi-volume mid-file split | Between-member works; single file > tape length errors (no GNUTYPE_MULTIVOL) |
-| `--pax-option` keyword processing | `delete=KEYWORD` only; full GNU set not implemented |
+| `--pax-option` keyword processing | full GNU set for create/list/extract (see COMPATIBILITY_PROGRESS) |
 
 ---
 

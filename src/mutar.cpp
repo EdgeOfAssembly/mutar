@@ -960,10 +960,242 @@ static Block encode_header(const Entry& e, const Config& cfg) {
 
 // ── PAX extended header encode/decode ─────────────────────────────────────────
 
-/// True if --pax-option did not request delete= for this keyword.
+// Defined later; used by --pax-option brace/{date} expansion.
+static std::time_t parse_date_string(const std::string& s);
+
+/// Keywords GNU tar marks XHDR_PROTECTED (cannot delete= / override).
+[[nodiscard]] static bool pax_protected_keyword(std::string_view kw) noexcept
+{
+    static constexpr std::string_view kProtected[] = {
+        "GNU.sparse.name", "GNU.sparse.major", "GNU.sparse.minor",
+        "GNU.sparse.realsize", "GNU.sparse.numblocks", "GNU.sparse.size",
+        "GNU.sparse.offset", "GNU.sparse.numbytes",
+        "GNU.dumpdir",
+        "GNU.volume.label", "GNU.volume.filename",
+        "GNU.volume.size", "GNU.volume.offset",
+    };
+    for (auto p : kProtected)
+        if (kw == p) return true;
+    return false;
+}
+
+/// True if delete=PATTERN would match a protected keyword (GNU rejects).
+[[nodiscard]] static bool pax_protected_pattern(std::string_view pattern)
+{
+    static constexpr std::string_view kProtected[] = {
+        "GNU.sparse.name", "GNU.sparse.major", "GNU.sparse.minor",
+        "GNU.sparse.realsize", "GNU.sparse.numblocks", "GNU.sparse.size",
+        "GNU.sparse.offset", "GNU.sparse.numbytes",
+        "GNU.dumpdir",
+        "GNU.volume.label", "GNU.volume.filename",
+        "GNU.volume.size", "GNU.volume.offset",
+    };
+    std::string pat(pattern);
+    for (auto p : kProtected)
+        if (::fnmatch(pat.c_str(), std::string(p).c_str(), 0) == 0)
+            return true;
+    return false;
+}
+
+[[nodiscard]] static bool pax_keyword_deleted(const PaxOptionRules& rules,
+                                              std::string_view key)
+{
+    std::string k(key);
+    for (const auto& pat : rules.delete_patterns)
+        if (::fnmatch(pat.c_str(), k.c_str(), 0) == 0)
+            return true;
+    return false;
+}
+
+[[nodiscard]] static bool pax_keyword_file_override(const PaxOptionRules& rules,
+                                                    std::string_view key)
+{
+    for (const auto& [k, v] : rules.file_overrides) {
+        (void)v;
+        if (k == key) return true;
+    }
+    return false;
+}
+
+/// True if keyword may be auto-emitted (not deleted, not file-overridden).
 [[nodiscard]] static bool pax_allowed(const Config& cfg, std::string_view key)
 {
-    return !cfg.pax_option_rules.delete_keywords.contains(std::string(key));
+    if (pax_keyword_deleted(cfg.pax_option_rules, key)) return false;
+    if (pax_keyword_file_override(cfg.pax_option_rules, key)) return false;
+    return true;
+}
+
+/// Expand exthdr/globexthdr name template: %d %f %p %n %%.
+[[nodiscard]] static std::string pax_format_name(std::string_view fmt,
+                                                 std::string_view filepath,
+                                                 std::size_t seq)
+{
+    std::string dir, base;
+    {
+        auto slash = filepath.find_last_of('/');
+        if (slash == std::string_view::npos) {
+            dir  = ".";
+            base = std::string(filepath);
+        } else {
+            dir = std::string(filepath.substr(0, slash));
+            if (dir.empty()) dir = "/";
+            base = std::string(filepath.substr(slash + 1));
+        }
+    }
+    const std::string pid  = std::to_string(::getpid());
+    const std::string nstr = std::to_string(seq);
+    std::string out;
+    out.reserve(fmt.size() + dir.size() + base.size() + 16);
+    for (std::size_t i = 0; i < fmt.size(); ++i) {
+        if (fmt[i] == '%' && i + 1 < fmt.size()) {
+            switch (fmt[i + 1]) {
+            case '%': out.push_back('%'); ++i; break;
+            case 'd': out += dir;  ++i; break;
+            case 'f': out += base; ++i; break;
+            case 'p': out += pid;  ++i; break;
+            case 'n': out += nstr; ++i; break;
+            default:
+                out.push_back(fmt[i]);
+                out.push_back(fmt[i + 1]);
+                ++i;
+                break;
+            }
+        } else {
+            out.push_back(fmt[i]);
+        }
+    }
+    while (out.size() > 1 && out.back() == '/') out.pop_back();
+    return out;
+}
+
+[[nodiscard]] static std::string pax_default_exthdr_template()
+{
+    return std::getenv("POSIXLY_CORRECT")
+        ? std::string("%d/PaxHeaders.%p/%f")
+        : std::string("%d/PaxHeaders/%f");
+}
+
+[[nodiscard]] static std::string pax_default_globexthdr_template()
+{
+    const char* tmpdir = std::getenv("TMPDIR");
+    if (!tmpdir || !*tmpdir) tmpdir = "/tmp";
+    std::string t(tmpdir);
+    if (std::getenv("POSIXLY_CORRECT"))
+        t += "/GlobalHead.%p.%n";
+    else
+        t += "/GlobalHead.%n";
+    return t;
+}
+
+[[nodiscard]] static std::string pax_exthdr_member_name(const Entry& e,
+                                                       const Config& cfg)
+{
+    std::string tmpl = cfg.pax_option_rules.exthdr_name;
+    if (tmpl.empty()) tmpl = pax_default_exthdr_template();
+    std::string name = pax_format_name(tmpl, e.name, 0);
+    if (name.size() > 99) name.resize(99);
+    return name;
+}
+
+/// Expand {date-or-file} brace values used in --pax-option (GNU get_date style).
+[[nodiscard]] static std::string pax_expand_brace_value(std::string_view val)
+{
+    if (val.size() < 2 || val.front() != '{' || val.back() != '}')
+        return std::string(val);
+    std::string inner(val.substr(1, val.size() - 2));
+    if (inner == "now")
+        return std::to_string(static_cast<long long>(std::time(nullptr)));
+    std::time_t t = parse_date_string(inner);
+    if (t != static_cast<std::time_t>(-1))
+        return std::to_string(static_cast<long long>(t));
+    return std::string(val);
+}
+
+/// Parse one comma-separated --pax-option item into rules (GNU xheader_set_option).
+static void parse_pax_option_item(PaxOptionRules& rules, std::string_view item)
+{
+    while (!item.empty() && item.front() == ' ') item.remove_prefix(1);
+    while (!item.empty() && item.back() == ' ')  item.remove_suffix(1);
+    if (item.empty()) return;
+
+    auto eq = item.find('=');
+    if (eq == std::string_view::npos) {
+        print(stderr, "mutar: Keyword {} is unknown or not yet implemented\n", item);
+        std::exit(EXIT_FAILURE);
+    }
+
+    bool per_file = false;
+    std::size_t kw_end = eq;
+    if (eq > 0 && item[eq - 1] == ':') {
+        per_file = true;
+        kw_end = eq - 1;
+    }
+    while (kw_end > 0 && item[kw_end - 1] == ' ') --kw_end;
+    std::string_view kw = item.substr(0, kw_end);
+    std::string_view raw_val = item.substr(eq + 1);
+    while (!raw_val.empty() && raw_val.front() == ' ') raw_val.remove_prefix(1);
+    std::string val = pax_expand_brace_value(raw_val);
+
+    if (kw == "delete") {
+        if (val.empty()) return;
+        if (pax_protected_pattern(val)) {
+            print(stderr, "mutar: Pattern {} cannot be used\n", val);
+            std::exit(EXIT_FAILURE);
+        }
+        rules.delete_patterns.push_back(std::move(val));
+        return;
+    }
+    if (kw == "exthdr.name") {
+        rules.exthdr_name = std::move(val);
+        return;
+    }
+    if (kw == "globexthdr.name") {
+        rules.globexthdr_name = std::move(val);
+        return;
+    }
+    if (kw == "exthdr.mtime") {
+        std::time_t t = parse_date_string(val);
+        if (t == static_cast<std::time_t>(-1)) {
+            print(stderr, "mutar: Time stamp is out of allowed range\n");
+            std::exit(EXIT_FAILURE);
+        }
+        rules.has_exthdr_mtime = true;
+        rules.exthdr_mtime = static_cast<std::int64_t>(t);
+        return;
+    }
+    if (kw == "globexthdr.mtime") {
+        std::time_t t = parse_date_string(val);
+        if (t == static_cast<std::time_t>(-1)) {
+            print(stderr, "mutar: Time stamp is out of allowed range\n");
+            std::exit(EXIT_FAILURE);
+        }
+        rules.has_globexthdr_mtime = true;
+        rules.globexthdr_mtime = static_cast<std::int64_t>(t);
+        return;
+    }
+
+    if (pax_protected_keyword(kw)) {
+        print(stderr, "mutar: Keyword {} cannot be overridden\n", kw);
+        std::exit(EXIT_FAILURE);
+    }
+    if (per_file)
+        rules.file_overrides.emplace_back(std::string(kw), std::move(val));
+    else
+        rules.global_overrides.emplace_back(std::string(kw), std::move(val));
+}
+
+static void parse_pax_option_string(PaxOptionRules& rules, std::string_view all)
+{
+    while (!all.empty()) {
+        auto comma = all.find(',');
+        std::string_view item = (comma == std::string_view::npos)
+            ? all : all.substr(0, comma);
+        if (comma == std::string_view::npos)
+            all = {};
+        else
+            all.remove_prefix(comma + 1);
+        parse_pax_option_item(rules, item);
+    }
 }
 
 // Encode a PAX record: "N keyword=value\n" where N = total length.
@@ -987,12 +1219,21 @@ static void pax_append(std::string& out, std::string_view key, std::string_view 
     out += '\n';
 }
 
-/// Append a PAX record only when the keyword is not deleted via --pax-option.
+/// Append a PAX record only when the keyword is not deleted / file-overridden.
 static void pax_append_if(std::string& out, const Config& cfg,
                           std::string_view key, std::string_view val)
 {
     if (pax_allowed(cfg, key))
         pax_append(out, key, val);
+}
+
+/// Append keyword:=value file overrides (after auto-coded fields).
+static void pax_append_file_overrides(std::string& out, const Config& cfg)
+{
+    for (const auto& [k, v] : cfg.pax_option_rules.file_overrides) {
+        if (!pax_keyword_deleted(cfg.pax_option_rules, k))
+            pax_append(out, k, v);
+    }
 }
 
 static std::map<std::string, std::string> pax_parse(std::string_view data) {
@@ -1623,6 +1864,17 @@ public:
     ArchiveReader(ArchiveStream& s, int blocking, bool ignore_zeros = false)
         : stream_(&s), buf_(blocking), ignore_zeros_(ignore_zeros) {}
 
+    /// Apply --pax-option rules on read (delete=, keyword=/:= overrides).
+    void set_pax_rules(const PaxOptionRules* rules) {
+        pax_rules_ = rules;
+        // CLI keyword=value acts as initial global overrides (seed only once).
+        cli_global_pax_.clear();
+        if (rules) {
+            for (const auto& [k, v] : rules->global_overrides)
+                cli_global_pax_[k] = v;
+        }
+    }
+
     /// Switch to a new volume stream (multi-volume extract). Resets block counter.
     void swap_stream(ArchiveStream& s) {
         stream_ = &s;
@@ -1664,10 +1916,6 @@ public:
             Entry e = decode_header(blk);
             e.block_offset = buf_.block_no() - 1;
 
-            // Merge pending PAX attributes
-            e.pax_attrs = std::move(pending_pax);
-            pending_pax.clear();
-
             // GNU LongName / LongLink
             if (e.typeflag == GNUTYPE_LONGNAME || e.typeflag == GNUTYPE_LONGLINK) {
                 std::string longstr = read_data_string(e.size);
@@ -1678,10 +1926,16 @@ public:
                 continue;
             }
 
-            // PAX extended header
+            // PAX extended / global headers
             if (e.typeflag == XHDTYPE || e.typeflag == XGLTYPE) {
                 std::string pax_data = read_data_string(e.size);
-                pending_pax = pax_parse(pax_data);
+                auto parsed = pax_parse_filtered(pax_data);
+                if (e.typeflag == XGLTYPE) {
+                    // Global header replaces prior archive-global map (GNU).
+                    archive_global_pax_ = std::move(parsed);
+                } else {
+                    pending_pax = std::move(parsed);
+                }
                 continue;
             }
 
@@ -1689,7 +1943,9 @@ public:
             if (!pending_longname.empty()) { e.name     = pending_longname; pending_longname.clear(); }
             if (!pending_longlink.empty()) { e.linkname = pending_longlink; pending_longlink.clear(); }
 
-            // Apply PAX attributes to entry
+            // Merge PAX attrs: CLI global → archive global → file x → CLI :=
+            e.pax_attrs = merge_pax_attrs(pending_pax);
+            pending_pax.clear();
             apply_pax_attrs(e);
 
             // GNU sparse: read sparse map from header + extension blocks
@@ -1817,6 +2073,46 @@ public:
         return true;
     }
 
+    /// Parse PAX payload, dropping keywords matched by delete= patterns.
+    std::map<std::string, std::string> pax_parse_filtered(std::string_view data) const {
+        auto attrs = pax_parse(data);
+        if (!pax_rules_) return attrs;
+        for (auto it = attrs.begin(); it != attrs.end(); ) {
+            if (pax_keyword_deleted(*pax_rules_, it->first) ||
+                pax_keyword_file_override(*pax_rules_, it->first))
+                it = attrs.erase(it);
+            else
+                ++it;
+        }
+        return attrs;
+    }
+
+    /// GNU decode order: CLI =, archive g, file x, CLI :=
+    std::map<std::string, std::string>
+    merge_pax_attrs(const std::map<std::string, std::string>& file_pax) const {
+        std::map<std::string, std::string> merged = cli_global_pax_;
+        for (const auto& [k, v] : archive_global_pax_)
+            merged[k] = v;
+        for (const auto& [k, v] : file_pax)
+            merged[k] = v;
+        if (pax_rules_) {
+            for (const auto& [k, v] : pax_rules_->file_overrides) {
+                if (!pax_keyword_deleted(*pax_rules_, k))
+                    merged[k] = v;
+            }
+        }
+        // Final delete= filter (covers CLI globals too)
+        if (pax_rules_) {
+            for (auto it = merged.begin(); it != merged.end(); ) {
+                if (pax_keyword_deleted(*pax_rules_, it->first))
+                    it = merged.erase(it);
+                else
+                    ++it;
+            }
+        }
+        return merged;
+    }
+
     void apply_pax_attrs(Entry& e) {
         for (auto& [k, v] : e.pax_attrs) {
             try {
@@ -1897,6 +2193,9 @@ public:
     ArchiveStream* stream_;
     BlockBuffer    buf_;
     bool           ignore_zeros_ = false;
+    const PaxOptionRules* pax_rules_ = nullptr;
+    std::map<std::string, std::string> cli_global_pax_;
+    std::map<std::string, std::string> archive_global_pax_;
 };
 
 // ── Archive writer ────────────────────────────────────────────────────────────
@@ -1922,6 +2221,37 @@ public:
 
     /// Enable sidecar index collection (pointer owned by caller).
     void set_index(ArchiveIndex* idx) { index_ = idx; }
+
+    /// Write a global PAX 'g' header for keyword=value overrides (once per archive).
+    void write_global_pax_header(const Config& cfg) {
+        if (cfg.pax_option_rules.global_overrides.empty()) return;
+        std::string pax_data;
+        for (const auto& [k, v] : cfg.pax_option_rules.global_overrides) {
+            if (!pax_keyword_deleted(cfg.pax_option_rules, k))
+                pax_append(pax_data, k, v);
+        }
+        if (pax_data.empty()) return;
+
+        ++global_header_count_;
+        Entry meta;
+        meta.typeflag = XGLTYPE;
+        std::string tmpl = cfg.pax_option_rules.globexthdr_name;
+        if (tmpl.empty()) tmpl = pax_default_globexthdr_template();
+        meta.name = pax_format_name(tmpl, {}, global_header_count_);
+        if (meta.name.size() > 99) meta.name.resize(99);
+        meta.size  = static_cast<std::int64_t>(pax_data.size());
+        meta.mtime = cfg.pax_option_rules.has_globexthdr_mtime
+                         ? cfg.pax_option_rules.globexthdr_mtime
+                         : static_cast<std::int64_t>(std::time(nullptr));
+        meta.mode  = 0600;
+        meta.fmt   = Format::PAX;
+
+        Config tmp_cfg;
+        tmp_cfg.fmt = Format::USTAR;
+        Block hblk = encode_header(meta, tmp_cfg);
+        buf_.write_block(*stream_, hblk);
+        write_data_bytes(pax_data.data(), pax_data.size());
+    }
 
     // Write two EOF blocks + flush
     void finish() {
@@ -2074,7 +2404,7 @@ private:
         write_data_bytes(data.data(), data.size());
     }
 
-    // Write PAX extended header (honours --pax-option delete=KEYWORD).
+    // Write PAX extended header (honours full --pax-option rules).
     // Also emits SCHILY.xattr.* / SCHILY.acl.* collected into e.pax_attrs.
     void write_pax_header(const Entry& e, bool need_path, bool need_link,
                           bool need_size, bool need_time, const Config& cfg) {
@@ -2098,15 +2428,17 @@ private:
         if (!e.gname.empty())
             pax_append_if(pax_data, cfg, "gname", e.gname);
         pax_append_schily(pax_data, cfg, e);
+        pax_append_file_overrides(pax_data, cfg);
 
         if (pax_data.empty()) return;
 
         Entry meta;
         meta.typeflag = XHDTYPE;
-        meta.name     = std::format("PaxHeaders/{}", e.name);
-        if (meta.name.size() > 99) meta.name = meta.name.substr(0, 99);
+        meta.name     = pax_exthdr_member_name(e, cfg);
         meta.size     = static_cast<std::int64_t>(pax_data.size());
-        meta.mtime    = e.mtime;
+        meta.mtime    = cfg.pax_option_rules.has_exthdr_mtime
+                            ? cfg.pax_option_rules.exthdr_mtime
+                            : e.mtime;
         meta.mode     = 0600;
         meta.fmt      = Format::PAX;
 
@@ -2159,11 +2491,13 @@ private:
         bool long_name = e.name.size() > 100;
         bool long_link = e.linkname.size() > 100;
         bool need_schily = entry_has_schily_pax(e);
+        bool need_file_ov = !cfg.pax_option_rules.file_overrides.empty();
         bool need_pax = long_name || long_link || e.size > 077777777777LL
-                        || e.mtime_nsec != 0 || need_schily;
+                        || e.mtime_nsec != 0 || need_schily || need_file_ov;
 
         // SCHILY xattr/ACL records require a PAX 'x' header even under GNU format.
-        if (fmt_ == Format::PAX || fmt_ == Format::USTAR || need_schily) {
+        // keyword:=value file overrides also force a per-file 'x' header.
+        if (fmt_ == Format::PAX || fmt_ == Format::USTAR || need_schily || need_file_ov) {
             if (need_pax)
                 write_pax_header(e, long_name, long_link,
                                  e.size > 077777777777LL, e.mtime_nsec != 0, cfg);
@@ -2315,14 +2649,16 @@ private:
             if (!e.gname.empty())
                 pax_append_if(pax_data, cfg, "gname", e.gname);
             pax_append_schily(pax_data, cfg, e);
+            pax_append_file_overrides(pax_data, cfg);
 
             // Emit PAX 'x' extended header block
             Entry pax_meta;
             pax_meta.typeflag = XHDTYPE;
-            pax_meta.name     = std::format("PaxHeaders/{}", e.name);
-            if (pax_meta.name.size() > 99) pax_meta.name = pax_meta.name.substr(0, 99);
+            pax_meta.name     = pax_exthdr_member_name(e, cfg);
             pax_meta.size     = static_cast<std::int64_t>(pax_data.size());
-            pax_meta.mtime    = e.mtime;
+            pax_meta.mtime    = cfg.pax_option_rules.has_exthdr_mtime
+                                    ? cfg.pax_option_rules.exthdr_mtime
+                                    : e.mtime;
             pax_meta.mode     = 0600;
             pax_meta.fmt      = Format::PAX;
             {
@@ -2498,6 +2834,7 @@ private:
     const std::map<std::string,std::string>* owner_map_ = nullptr;
     const std::map<std::string,std::string>* group_map_ = nullptr;
     ArchiveIndex*  index_ = nullptr;
+    std::size_t    global_header_count_ = 0;  // for globexthdr.name %n
 };
 
 // ── Path utilities ────────────────────────────────────────────────────────────
@@ -3689,6 +4026,8 @@ static int op_list(const Config& cfg) {
     }
     ArchiveStream& s = *res;
     ArchiveReader reader(s, cfg.blocking_factor, cfg.ignore_zeros);
+    if (cfg.pax_option_rules.any())
+        reader.set_pax_rules(&cfg.pax_option_rules);
 
     if (!cfg.index_file.empty()) {
         g_index_fp = std::fopen(cfg.index_file.c_str(), "w");
@@ -3798,6 +4137,12 @@ static int op_create(const Config& cfg) {
     // -o on create: same as --old-archive (V7), matching GNU tar
     if (cfg.old_archive || cfg.compat_o) fmt = Format::V7;
 
+    // GNU: --pax-option on create requires POSIX/PAX format
+    if (cfg.pax_option_rules.any() && fmt != Format::PAX) {
+        print(stderr, "mutar: --pax-option can be used only on POSIX archives\n");
+        return EXIT_FAILURE;
+    }
+
     ArchiveWriter writer(s, cfg.blocking_factor, fmt);
 
     // Optional sidecar index collection (--write-index / --mutar-index / --seekable)
@@ -3806,6 +4151,10 @@ static int op_create(const Config& cfg) {
         cfg.write_index || !cfg.mutar_index.empty() || cfg.seekable;
     if (collect_index)
         writer.set_index(&create_index);
+
+    // Global PAX 'g' header for keyword=value overrides (before members)
+    if (cfg.pax_option_rules.any())
+        writer.write_global_pax_header(cfg);
 
     // Volume label
     if (!cfg.label.empty()) {
@@ -4319,6 +4668,8 @@ static int op_extract(const Config& cfg) {
     }
 
     ArchiveReader reader(s, cfg.blocking_factor, cfg.ignore_zeros);
+    if (cfg.pax_option_rules.any())
+        reader.set_pax_rules(&cfg.pax_option_rules);
 
     if (!cfg.directory.empty()) {
         if (::chdir(cfg.directory.c_str()) < 0) {
@@ -4891,6 +5242,8 @@ static int op_diff(const Config& cfg) {
     }
     ArchiveStream& s = *res;
     ArchiveReader reader(s, cfg.blocking_factor, cfg.ignore_zeros);
+    if (cfg.pax_option_rules.any())
+        reader.set_pax_rules(&cfg.pax_option_rules);
 
     int exit_code = EXIT_SUCCESS;
 
@@ -4946,6 +5299,8 @@ static int op_append(const Config& cfg) {
     }
     ArchiveStream& s = *res;
     ArchiveReader reader(s, cfg.blocking_factor, cfg.ignore_zeros);
+    if (cfg.pax_option_rules.any())
+        reader.set_pax_rules(&cfg.pax_option_rules);
 
     // Skip to end
     for (;;) {
@@ -4989,6 +5344,8 @@ static int op_update(const Config& cfg) {
         }
         ArchiveStream& s = *res;
         ArchiveReader reader(s, cfg.blocking_factor, cfg.ignore_zeros);
+        if (cfg.pax_option_rules.any())
+            reader.set_pax_rules(&cfg.pax_option_rules);
         for (;;) {
             auto [e, ok, eof] = reader.next_entry();
             if (eof || !ok) break;
@@ -5044,6 +5401,8 @@ static int op_delete(const Config& cfg) {
         }
         ArchiveStream& src = *res;
         ArchiveReader reader(src, cfg.blocking_factor);
+        if (cfg.pax_option_rules.any())
+            reader.set_pax_rules(&cfg.pax_option_rules);
 
         Config out_cfg;
         out_cfg.archive_file = tmpfile;
@@ -5108,6 +5467,8 @@ static int op_test_label(const Config& cfg) {
     }
     ArchiveStream& s = *res;
     ArchiveReader reader(s, cfg.blocking_factor, cfg.ignore_zeros);
+    if (cfg.pax_option_rules.any())
+        reader.set_pax_rules(&cfg.pax_option_rules);
 
     auto [e, ok, eof] = reader.next_entry();
     if (!ok || eof) return EXIT_FAILURE;
@@ -5856,27 +6217,11 @@ static Config parse_args(int argc, char* argv[]) {
 
         case OPT_PAX_OPTION: {
             // --pax-option=keyword[[:]=value][,keyword[[:]=value]]...
-            // Repeatable. MVP: only delete=KEYWORD (empty delete= ignored).
-            // Unknown keywords accepted silently (full GNU set is large).
+            // GNU: delete=, exthdr.*, globexthdr.*, keyword=/:= overrides.
+            // Bare keyword (no '=') → error. Protected keywords rejected.
             if (!::optarg) break;
             cfg.pax_options.emplace_back(::optarg);
-            std::string_view all = ::optarg;
-            while (!all.empty()) {
-                auto comma = all.find(',');
-                std::string_view item = (comma == std::string_view::npos)
-                    ? all : all.substr(0, comma);
-                if (comma == std::string_view::npos)
-                    all = {};
-                else
-                    all.remove_prefix(comma + 1);
-
-                if (item.starts_with("delete=")) {
-                    std::string_view kw = item.substr(7);
-                    if (!kw.empty())
-                        cfg.pax_option_rules.delete_keywords.emplace(kw);
-                }
-                // else: unknown / not-yet-implemented keyword — ignore
-            }
+            parse_pax_option_string(cfg.pax_option_rules, ::optarg);
             break;
         }
 
@@ -6319,7 +6664,8 @@ static void print_usage(const char* prog) {
         "\nArchive format selection:\n"
         "      --format=FORMAT, -H FORMAT  Create archive of the given format (v7 oldgnu gnu ustar pax)\n"
         "      --old-archive, --portability  Same as --format=v7\n"
-        "      --pax-option=delete=KEYWORD[,...]  Suppress PAX keywords (delete= only; partial)\n"
+        "      --pax-option=keyword[[:]=value][,...]  Control PAX keywords (delete=, exthdr.name,\n"
+        "                                  globexthdr.name, exthdr.mtime, keyword=/:= overrides)\n"
         "      --posix                     Same as --format=posix\n"
         "  -V, --label=TEXT                Create archive with volume name TEXT\n"
         "\nCompression options:\n"

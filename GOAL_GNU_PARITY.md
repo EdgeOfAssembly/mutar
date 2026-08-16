@@ -325,7 +325,7 @@ Report after each phase: commits, tests+exit codes, residual gaps.
 ## 10. Success metrics (checklist)
 
 - [ ] G0.1 `--show-snapshot-field-ranges`  
-- [ ] G1.1 full `--pax-option`  
+- [x] G1.1 full `--pax-option`  
 - [ ] G1.2 `--sparse-version`  
 - [ ] G1.3 `-s` / preserve-order  
 - [x] G1.4 `-G` incremental  

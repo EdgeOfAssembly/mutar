@@ -212,9 +212,11 @@ and
 are mutar extensions.
 .IP \(bu 3
 .B \-\-pax\-option
-implements
-.B delete=KEYWORD
-only.
+implements the GNU keyword set
+.RB ( delete=PATTERN ,
+exthdr.name/mtime, globexthdr.name/mtime,
+.BR keyword= / :=
+overrides).
 .IP \(bu 3
 Multi-volume supports between-member create/extract and volume scripts;
 mid-file continuation is not implemented.

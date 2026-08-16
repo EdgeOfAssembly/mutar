@@ -216,7 +216,9 @@ process and reading `#1 in mutar::pax_append` directly from the backtrace.
 - **Remote tape** (`--rsh/rmt-command`): `rmt` protocol not wired
 - **Multi-volume** (`-M`): volume switching not implemented
 - **PAX sparse write**: sparse data currently written as GNU 'S' format only; PAX extended-header sparse map format not yet emitted
-- **`--pax-option`**: `delete=KEYWORD` applied in `write_pax_header` / sparse PAX emission; other keywords not yet
+- **`--pax-option`**: full GNU set — `delete=PATTERN` (fnmatch), `exthdr.name`/`exthdr.mtime`,
+  `globexthdr.name`/`globexthdr.mtime`, `keyword=value` (global `'g'` header), `keyword:=value`
+  (per-file `'x'` override); applied on write and read; bare keyword / protected overrides error
 - **UID/GID map files**: `--owner-map` / `--group-map` stored but mapping not applied
 
 ---

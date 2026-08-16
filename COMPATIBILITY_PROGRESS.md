@@ -83,7 +83,7 @@ Legend:
 | `-H` / `--format=FORMAT` | ✅ | v7, oldgnu, gnu, ustar, pax |
 | `--posix` | ✅ | Alias for `-H pax` |
 | `--old-archive` / `--portability` | ✅ | Alias for `-H v7` |
-| `--pax-option=KW[:=]VAL` | ⚠️ Partial | `delete=KEYWORD` applied when writing PAX headers; other keywords accepted silently (not full GNU set) |
+| `--pax-option=KW[:=]VAL` | ✅ Implemented | Full GNU set: `delete=PATTERN`, `exthdr.*`, `globexthdr.*`, `keyword=`/`:=`; bare keyword errors; protected keywords rejected |
 
 ### File Selection
 
@@ -563,7 +563,7 @@ compatibility.
 
 | Feature | Config field(s) | Gap |
 |---------|----------------|-----|
-| `--pax-option` | `pax_options`, `pax_option_rules` | ⚠️ Partial: `delete=KEYWORD` (repeatable / comma-list) suppresses that keyword in `write_pax_header` and sparse PAX emission; other keywords ignored |
+| `--pax-option` | `pax_options`, `pax_option_rules` | ✅ Full: `delete=PATTERN` (fnmatch), `exthdr.name`/`mtime`, `globexthdr.name`/`mtime`, global `keyword=` + per-file `keyword:=`; write + read; tests in `tests/test_pax_option.sh` |
 | `--volno-file` | `volno_file` | ✅ Phase C: CLI assigns; atomic read/write of current volume number |
 | `--owner-map` / `--group-map` | `owner_map_file`, `group_map_file` | ✅ PR #172: fully implemented; maps uname/gname/uid/gid at create time |
 | `--info-script` / `--new-volume-script` | `info_script` | ✅ Phase C: exec'd at volume boundary; non-zero fails; TAR_* env |
@@ -710,4 +710,31 @@ Previously both long options were miswired to `OPT_EXCLUDE_FROM` (global pattern
 **Not claimed:** mid-file multi-volume, rmt lseek, full GNU binary snapshot format for `-g` (mutar keeps MUTAR_SNAPSHOT_V2).
 
 **Tests:** `tests/test_phase2_3_parity.sh` (CTest `mutar_phase2_3_parity_tests`).
+**Build:** Debug + ASan + UBSan.
+
+---
+
+## GOAL_GNU_PARITY Phase 4 — full --pax-option (G1.1) (2026-08-16)
+
+| ID | Option | Status | Notes |
+|----|--------|--------|-------|
+| G1.1 | `--pax-option` | ✅ | Full GNU tar 1.35 keyword set on create/list/extract |
+
+**Keywords implemented:**
+
+| Form | Behavior |
+|------|----------|
+| `delete=PATTERN` | fnmatch suppress on write and read; empty pattern ignored; protected patterns rejected |
+| `exthdr.name=STRING` | ustar name for `'x'` headers; `%d` `%f` `%p` `%n` `%%` |
+| `exthdr.mtime=VALUE` | ustar mtime of `'x'` header (epoch / date / `{now}`) |
+| `globexthdr.name=STRING` | ustar name for `'g'` headers |
+| `globexthdr.mtime=VALUE` | ustar mtime of `'g'` header |
+| `keyword=value` | global `'g'` header at archive start |
+| `keyword:=value` | per-file `'x'` override (suppresses auto-coded same key) |
+| bare `keyword` | error: unknown or not yet implemented |
+| protected keys | `GNU.sparse.*`, `GNU.dumpdir`, `GNU.volume.*` cannot be overridden/deleted |
+
+**Also:** create requires POSIX/PAX format (GNU error if not); default exthdr name `%d/PaxHeaders/%f` (or `%d/PaxHeaders.%p/%f` when `POSIXLY_CORRECT`).
+
+**Tests:** `tests/test_pax_option.sh` (CTest `mutar_pax_option_tests`) — 27 cases including system `tar -tf` interop.
 **Build:** Debug + ASan + UBSan.
