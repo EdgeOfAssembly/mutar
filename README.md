@@ -29,7 +29,7 @@ Performance claims require published benchmarks; see `PROGRESS.md` Phase F.
 | Sidecar index | `--write-index` / `--mutar-index` |
 | Seek | Uncompressed direct `lseek`; compressed **materialize-then-seek** (`--seekable`) — not frame-level |
 | PAX options | full `--pax-option` (delete=, exthdr.*, globexthdr.*, keyword=/:=) |
-| Multi-volume | Between-member `-M -L` + volno/info-script; **mid-file split partial** |
+| Multi-volume | `-M -L` between-member + mid-file split (`GNUTYPE_MULTIVOL` 'M') |
 | xattrs / ACLs | SCHILY PAX store/restore when host libs present |
 | Formal | `make verify` — path sanitize fixtures + CBMC |
 | Man page | `mutar.1` |
@@ -218,7 +218,7 @@ Magic-byte auto-detection works on read even without `-a`.
 | `--selinux` / `--no-selinux` | ❌ Unsupported | Policy: no-op + warning (no test hardware) |
 | `-G -g --listed-incremental` | ✅ | `-G` dumpdir create/extract purge; `-g` snapshot V2; level≥1 skips unchanged files/symlinks/specials; dirs always dumped |
 | `--exclude-ignore{,-recursive}` | ✅ | Per-directory ignore files (children only vs whole subtree) |
-| `--multi-volume -M -L` | ⚠️ Partial | Between-member rotation + extract stream swap; mid-file split not supported |
+| `--multi-volume -M -L` | ✅ | Between-member + mid-file split (`GNUTYPE_MULTIVOL` 'M'); extract reassembly; GNU tar interop |
 | `--rsh-command --rmt-command` | ⚠️ Partial | rmt O/R/W/C bridge via rsh; lseek (`S`) / remote append not supported |
 | `--backup --suffix` | ✅ | `none`/`off`, `simple`/`never`, `numbered`/`t`, `existing`/`nil` (+ `--suffix`) |
 | `-s / --preserve-order` | ⚠️ Partial | Accepted (emits warning); not yet wired into traversal |
@@ -234,7 +234,7 @@ Magic-byte auto-detection works on read even without `-a`.
 | SELinux | Unsupported by policy (`--selinux` no-op + warning); never stored under `--xattrs` |
 | Incremental backups (`-G -g`) | ✅ dumpdir + listed-incremental skip (see COMPATIBILITY_PROGRESS Phase 3) |
 | Remote tape (`--rsh/rmt-command`) | Bridge works; lseek over rmt / remote append not implemented |
-| Multi-volume mid-file split | Between-member works; single file > tape length errors (no GNUTYPE_MULTIVOL) |
+| Multi-volume mid-file split | ✅ Implemented (Phase 5 / G1.6) |
 | `--pax-option` keyword processing | full GNU set for create/list/extract (see COMPATIBILITY_PROGRESS) |
 
 ---

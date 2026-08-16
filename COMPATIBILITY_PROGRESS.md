@@ -216,7 +216,7 @@ Legend:
 
 | Option | Status | Notes |
 |--------|--------|-------|
-| `-M` / `--multi-volume` | ⚠️ | Between-member create/extract with stream swap; mid-file split not supported |
+| `-M` / `--multi-volume` | ✅ | Between-member + mid-file split (`GNUTYPE_MULTIVOL` 'M'); extract reassembly across volumes |
 | `-L` / `--tape-length=N` | ✅ | Parsed into `cfg.tape_length` (KiB); implies `-M`; pre-rotates when next member won't fit |
 | `-F` / `--info-script=CMD` / `--new-volume-script=CMD` | ✅ | Exec'd at volume boundary; `TAR_ARCHIVE`/`TAR_VOLUME` set; non-zero exit fails create; implies `-M` |
 | `--volno-file=FILE` | ✅ | Read at start; atomic write (mkstemp+rename) after each rotation and at end |
@@ -452,20 +452,24 @@ to include all new/modified entries.
 **Limitation**: only regular files are compared by mtime. Directories,
 symlinks, and special files are always archived on level≥1.
 
-### 4. Multi-volume support (`-M --tape-length=N`) — between-member (GOAL_NEXT Phase C)
+### 4. Multi-volume support (`-M --tape-length=N`) — between-member + mid-file
 
 `-L` / `--tape-length=N` parses into `cfg.tape_length` (N × 1024 bytes) and
 implies `-M`. `make_volume_name()` uses `%d` or `.N` suffixes. On create,
-before each member, if the estimated size will not fit on the current volume,
-`rotate_volume()` finishes the volume (EOF blocks), runs `--info-script` (with
-`TAR_ARCHIVE` / `TAR_VOLUME`), writes `--volno-file` atomically, opens the next
-volume path, and `ArchiveWriter::swap_stream()` continues. Extract on EOF
+between-member rotation finishes the volume (EOF blocks), runs `--info-script`
+(with `TAR_ARCHIVE` / `TAR_VOLUME`), writes `--volno-file` atomically, opens the
+next volume path, and `ArchiveWriter::swap_stream()` continues. Extract on EOF
 auto-opens the next volume file when present and `ArchiveReader::swap_stream()`
 continues.
 
-**Limitation (⚠️ Partial for G2 mid-file):** a single member larger than the tape
-length is rejected with a clear error — mid-file split (`GNUTYPE_MULTIVOL` 'M')
-is not implemented. Tests: `tests/test_multi_volume.sh`.
+**Mid-file split (GOAL_GNU_PARITY Phase 5 / G1.6):** when a regular file does not
+fit in the remaining tape capacity, mutar writes a partial first fragment
+(typeflag `'0'`, size = full logical size), flushes the volume without EOF zeros,
+then continues on the next volume with `GNUTYPE_MULTIVOL` (`'M'`) headers that
+carry the byte offset in the GNU oldgnu `offset` field (byte 369) and
+size = remaining bytes. Extract reassembles across volumes; GNU tar 1.35 can
+extract mutar mid-file multi-vol archives. Tests: `tests/test_multi_volume.sh`
+(T-MVOL-BIG, T-MVOL-BIG-GNU, T-MVOL-MIX, T-MVOL-VOLNO-BIG).
 
 ### 4b. xattrs + ACLs (GOAL_NEXT Phase D / G6–G8)
 
@@ -577,7 +581,7 @@ compatibility.
 | `--selinux` / `--no-selinux` | `selinux` | **Unsupported by policy** (no test hardware); accepted as no-op with warning |
 | `-G` / `-g` (incremental) | `listed_incremental`, `incremental` | ✅ Phase 3: dumpdir create/extract (`-G`); listed-incremental skip for files/symlinks/specials; dirs always dumped; snapshot V2 |
 | `--exclude-ignore` / `--exclude-ignore-recursive` | `exclude_ignore`, `exclude_ignore_recursive` | ✅ Phase 2: per-directory ignore files (not global `-X`) |
-| `-M` (multi-volume) | `multi_volume` | ⚠️ Phase C: between-member stream swap create+extract; **mid-file split still TODO** |
+| `-M` (multi-volume) | `multi_volume` | ✅ Phase 5: between-member + mid-file `GNUTYPE_MULTIVOL` split/reassemble |
 | `--rsh-command` / `--rmt-command` | `rsh_command`, `rmt_command` | 🔧 PR #172: rmt bridge via rsh fork+pipe; O/R/W/C protocol implemented. **Limitation (G11):** rmt `lseek`/`S` and remote append not implemented (documented in `--help`) |
 | PAX sparse write format | `fmt_` | ✅ PR #172: when `--format=pax`, GNU.sparse.* PAX keywords emitted; GNU.sparse.map parsed on read |
 | `--warning=KEYWORD` | `warnings_enabled/disabled` | ✅ PR #172: `mutar_warn()` helper implemented and wired at key emission sites |
@@ -707,7 +711,7 @@ Previously both long options were miswired to `OPT_EXCLUDE_FROM` (global pattern
 
 **GNU interop:** system `tar -tf` lists mutar `-G` archives. Full GNU `-G` extract purge interop not claimed as a hard gate; mutar↔mutar dumpdir round-trip + purge tested.
 
-**Not claimed:** mid-file multi-volume, rmt lseek, full GNU binary snapshot format for `-g` (mutar keeps MUTAR_SNAPSHOT_V2).
+**Not claimed:** rmt lseek, full GNU binary snapshot format for `-g` (mutar keeps MUTAR_SNAPSHOT_V2).
 
 **Tests:** `tests/test_phase2_3_parity.sh` (CTest `mutar_phase2_3_parity_tests`).
 **Build:** Debug + ASan + UBSan.
@@ -738,3 +742,18 @@ Previously both long options were miswired to `OPT_EXCLUDE_FROM` (global pattern
 
 **Tests:** `tests/test_pax_option.sh` (CTest `mutar_pax_option_tests`) — 27 cases including system `tar -tf` interop.
 **Build:** Debug + ASan + UBSan.
+
+---
+
+## GOAL_GNU_PARITY Phase 5 — mid-file multi-volume (G1.6) (2026-08-16)
+
+| ID | Option | Status | Notes |
+|----|--------|--------|-------|
+| G1.6 | `-M` / `--multi-volume` + `-L` mid-file | ✅ | Create splits oversized regular files with `GNUTYPE_MULTIVOL` (`'M'`); extract reassembles; between-member rotation kept |
+
+**Create:** first fragment typeflag `'0'` with size = full logical size; when tape fills, flush without EOF zeros, open next volume, write `'M'` header with oldgnu offset (byte 369) and size = remaining. **Extract:** short data read → open next volume → expect `'M'` → continue at offset. **Interop:** GNU tar 1.35 extracts mutar mid-file multi-vol (T-MVOL-BIG-GNU).
+
+**Residual limits:** sparse files are not mid-file split; tape length best aligned to blocking factor (default 20 × 512 = 10 KiB matches `-L 10`); starting extract mid-set from a pure `'M'` volume works but is uncommon.
+
+**Tests:** `tests/test_multi_volume.sh` (CTest `mutar_multi_volume_tests`) — T-MVOL-BIG, T-MVOL-BIG-GNU, T-MVOL-MIX, T-MVOL-VOLNO-BIG + prior between-member cases.
+**Build:** Debug + ASan + UBSan; full ctest green.

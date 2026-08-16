@@ -37,6 +37,7 @@
 
 #include <deque>
 #include <fstream>
+#include <functional>
 #include <iomanip>
 #include <iostream>
 #include <limits>
@@ -889,6 +890,15 @@ static Entry decode_header(const Block& blk) {
         }
     }
 
+    // GNUTYPE_MULTIVOL ('M'): offset at oldgnu.offset even when magic is empty
+    // (GNU tar often writes continuation headers with a blank magic field).
+    if (h.typeflag == GNUTYPE_MULTIVOL) {
+        e.multivol_offset =
+            static_cast<std::int64_t>(read_octal({blk.oldgnu.offset, 12}));
+        if (e.fmt == Format::V7)
+            e.fmt = Format::GNU;
+    }
+
     e.asize = e.size;
     return e;
 }
@@ -953,6 +963,12 @@ static Block encode_header(const Entry& e, const Config& cfg) {
     if (e.uid > 0777777) write_base256(h.uid, 8, e.uid);
     if (e.gid > 0777777) write_base256(h.gid, 8, e.gid);
     if (e.size > 077777777777LL) write_base256(h.size, 12, e.size);
+
+    // Multi-volume continuation: GNU oldgnu offset at byte 369 (overlays prefix).
+    if (e.typeflag == GNUTYPE_MULTIVOL || e.multivol_offset > 0) {
+        write_octal(blk.oldgnu.offset, 12,
+                    static_cast<std::uint64_t>(e.multivol_offset));
+    }
 
     write_checksum(blk);
     return blk;
@@ -1980,13 +1996,22 @@ public:
         return result;
     }
 
-    // Read entry data, writing to fd (or string if fd < 0)
+    // Read entry data, writing to fd (or string if fd < 0).
+    // On clean volume EOF before asize bytes (multi-volume mid-file), returns
+    // true and sets *got_out to bytes actually read (may be < e.asize).
+    // Returns false only on write/I/O error.
     bool read_entry_data(const Entry& e, int out_fd,
-                         std::function<void(const char*, std::size_t)> on_data = {}) {
+                         std::function<void(const char*, std::size_t)> on_data = {},
+                         std::int64_t* got_out = nullptr) {
         std::int64_t remaining = e.asize;
+        std::int64_t got_total = 0;
         Block blk{};
         while (remaining > 0) {
-            if (!buf_.read_block(*stream_, blk)) return false;
+            if (!buf_.read_block(*stream_, blk)) {
+                if (got_out) *got_out = got_total;
+                // Short read is OK for multi-volume; caller decides.
+                return true;
+            }
             std::size_t chunk = static_cast<std::size_t>(
                 std::min<std::int64_t>(BLOCKSIZE, remaining));
             if (out_fd >= 0) {
@@ -1994,13 +2019,19 @@ public:
                 std::size_t left = chunk;
                 while (left > 0) {
                     ssize_t w = ::write(out_fd, p, left);
-                    if (w < 0) { if (errno == EINTR) continue; return false; }
+                    if (w < 0) {
+                        if (errno == EINTR) continue;
+                        if (got_out) *got_out = got_total;
+                        return false;
+                    }
                     p += w; left -= static_cast<std::size_t>(w);
                 }
             }
             if (on_data) on_data(blk.buffer, chunk);
+            got_total += static_cast<std::int64_t>(chunk);
             remaining -= BLOCKSIZE;
         }
+        if (got_out) *got_out = got_total;
         return true;
     }
 
@@ -2212,6 +2243,19 @@ public:
         stream_ = &s;
         buf_.reset_at_block(0);
     }
+
+    /// Enable mid-file multi-volume split. @p max_blocks is tape capacity in
+    /// 512-byte blocks; @p rotate(mid_member) switches volumes (caller opens
+    /// the next stream and calls swap_stream). When mid_member is true the
+    /// current volume has already been flushed without EOF zero blocks.
+    void set_multivol(std::int64_t max_blocks,
+                      std::function<bool(bool mid_member)> rotate) {
+        max_blocks_ = max_blocks;
+        rotate_     = std::move(rotate);
+    }
+
+    /// Flush pending record bytes without writing EOF zero blocks.
+    void flush_volume() { buf_.flush(*stream_); }
 
     // Set optional owner/group remapping maps (pointers may be null).
     void set_owner_map(const std::map<std::string,std::string>* om,
@@ -2543,6 +2587,14 @@ private:
                        const Config& cfg, const struct stat& st) {
         record_index_entry(e);
         maybe_write_extensions(e, cfg);
+
+        // Room for the member header (and later data) on this volume.
+        if (max_blocks_ > 0 && buf_.block_no() >= max_blocks_) {
+            if (!rotate_ || !rotate_(false))
+                return false;
+        }
+
+        // First fragment: typeflag '0', size = full logical file size (GNU).
         Block hblk = encode_header(e, cfg);
         buf_.write_block(*stream_, hblk);
 
@@ -2553,10 +2605,27 @@ private:
             return false;
         }
 
-        std::int64_t remaining = e.size;
+        std::int64_t remaining   = e.size;
+        std::int64_t file_offset = 0; // bytes successfully archived so far
         char blkbuf[BLOCKSIZE];
         bool io_error = false;
         while (remaining > 0 && !io_error) {
+            // Mid-file multi-volume: volume full → flush, rotate, write 'M' header.
+            if (max_blocks_ > 0 && buf_.block_no() >= max_blocks_) {
+                buf_.flush(*stream_);
+                if (!rotate_ || !rotate_(true)) {
+                    ::close(fd);
+                    return false;
+                }
+                Entry cont     = e;
+                cont.typeflag  = GNUTYPE_MULTIVOL;
+                cont.multivol_offset = file_offset;
+                cont.size      = remaining; // remaining bytes from this offset
+                cont.asize     = remaining;
+                Block cblk     = encode_header(cont, cfg);
+                buf_.write_block(*stream_, cblk);
+            }
+
             std::int64_t to_read = std::min(remaining, static_cast<std::int64_t>(BLOCKSIZE));
             std::memset(blkbuf, 0, BLOCKSIZE);
             ssize_t got = 0;
@@ -2570,14 +2639,15 @@ private:
                 Block b{};
                 std::memcpy(b.buffer, blkbuf, BLOCKSIZE);
                 buf_.write_block(*stream_, b);
-                remaining -= got;
+                remaining   -= got;
+                file_offset += got;
             }
         }
         ::close(fd);
         restore_atime_if_needed(fspath, cfg, st);
         // Pad any remaining blocks (file shorter than stated size)
         write_data_zeros(remaining);
-        return true;
+        return !io_error;
     }
 
     // Write a GNU sparse ('S' type) entry using SEEK_DATA/SEEK_HOLE hole detection.
@@ -2835,6 +2905,8 @@ private:
     const std::map<std::string,std::string>* group_map_ = nullptr;
     ArchiveIndex*  index_ = nullptr;
     std::size_t    global_header_count_ = 0;  // for globexthdr.name %n
+    std::int64_t   max_blocks_ = 0;           // multi-volume tape capacity (0 = off)
+    std::function<bool(bool mid_member)> rotate_;
 };
 
 // ── Path utilities ────────────────────────────────────────────────────────────
@@ -3012,7 +3084,9 @@ static int ensure_parent_dirs_nofollow(const std::string& outpath, const Config&
 ///
 /// Policy: intermediate symlinks are replaced with real directories unless
 /// --keep-directory-symlink. Final symlink is unlinked unless --keep-old-files.
-static int open_extract_regular(const std::string& outpath, const Config& cfg) {
+/// @param no_trunc  When true (multi-volume continuation), open without O_TRUNC.
+static int open_extract_regular(const std::string& outpath, const Config& cfg,
+                                bool no_trunc = false) {
     int dirfd = AT_FDCWD;
     std::string base;
     if (walk_extract_parent(outpath, cfg, &dirfd, &base) < 0)
@@ -3035,7 +3109,8 @@ static int open_extract_regular(const std::string& outpath, const Config& cfg) {
         }
     }
 
-    int flags = O_WRONLY | O_CREAT | O_TRUNC | k_extract_nofollow;
+    int flags = O_WRONLY | O_CREAT | k_extract_nofollow;
+    if (!no_trunc) flags |= O_TRUNC;
     int fd = ::openat(dirfd, base.c_str(), flags, 0666);
     if (fd < 0 && (errno == ELOOP || errno == EEXIST)) {
         if (cfg.keep_old_files) {
@@ -3050,7 +3125,8 @@ static int open_extract_regular(const std::string& outpath, const Config& cfg) {
             flags = O_WRONLY | O_CREAT | O_EXCL | k_extract_nofollow;
             fd = ::openat(dirfd, base.c_str(), flags, 0666);
             if (fd < 0) {
-                flags = O_WRONLY | O_CREAT | O_TRUNC | k_extract_nofollow;
+                flags = O_WRONLY | O_CREAT | k_extract_nofollow;
+                if (!no_trunc) flags |= O_TRUNC;
                 fd = ::openat(dirfd, base.c_str(), flags, 0666);
             }
         }
@@ -4244,8 +4320,11 @@ static int op_create(const Config& cfg) {
     const bool do_multivol = cfg.multi_volume && max_blocks > 0;
 
     // Finish current volume, run info-script, open next volume, swap writer stream.
-    auto rotate_volume = [&]() -> bool {
-        writer.finish();
+    // mid_member=true: volume already flushed without EOF zero blocks (GNUTYPE_MULTIVOL).
+    // mid_member=false: write EOF zeros then rotate (between-member boundary).
+    auto rotate_volume = [&](bool mid_member) -> bool {
+        if (!mid_member)
+            writer.finish();
         total_bytes += writer.block_no() * static_cast<std::int64_t>(BLOCKSIZE);
         std::string finished_path = vol_cfg.archive_file;
         s.close();
@@ -4277,6 +4356,9 @@ static int op_create(const Config& cfg) {
         writer.swap_stream(s);
         return true;
     };
+
+    if (do_multivol)
+        writer.set_multivol(max_blocks, rotate_volume);
 
     auto add_file = [&](const std::string& raw_archname, const std::string& fspath) {
         // Apply --newer filter (skip files not newer than cutoff)
@@ -4362,34 +4444,30 @@ static int op_create(const Config& cfg) {
             }
         }
 
-        // Multi-volume: refuse members larger than tape length (no mid-file split).
-        // Pre-rotate when the next member will not fit on the current volume.
+        // Multi-volume: pre-rotate when the current volume has no room for a
+        // new member header. Large regular files are split mid-file via
+        // GNUTYPE_MULTIVOL ('M') inside ArchiveWriter::write_regular.
         if (do_multivol) {
-            struct stat mst{};
-            if (::lstat(fspath.c_str(), &mst) == 0 && S_ISREG(mst.st_mode)) {
-                const std::int64_t max_bytes =
-                    static_cast<std::int64_t>(cfg.tape_length) * 1024LL;
-                const std::int64_t data_blocks =
-                    (mst.st_size + static_cast<std::int64_t>(BLOCKSIZE) - 1)
-                    / static_cast<std::int64_t>(BLOCKSIZE);
-                const std::int64_t need_blocks = 1 + data_blocks;
-                const std::int64_t need_bytes =
-                    need_blocks * static_cast<std::int64_t>(BLOCKSIZE);
-                if (need_bytes > max_bytes) {
-                    print(stderr,
-                          "mutar: {}: file larger than tape length ({} KiB); "
-                          "mid-file multi-volume split is not supported\n",
-                          fspath, cfg.tape_length);
-                    exit_code = EXIT_FAILURE;
-                    return;
+            if (writer.block_no() > 0 && writer.block_no() >= max_blocks) {
+                if (!rotate_volume(false)) return;
+            } else {
+                struct stat mst{};
+                if (::lstat(fspath.c_str(), &mst) == 0 && S_ISREG(mst.st_mode)) {
+                    // If the whole member fits with EOF margin, keep it here.
+                    // Otherwise still start here so mid-file split can fill the tape
+                    // (unless fewer than 2 blocks remain — rotate for a clean start).
+                    const std::int64_t data_blocks =
+                        (mst.st_size + static_cast<std::int64_t>(BLOCKSIZE) - 1)
+                        / static_cast<std::int64_t>(BLOCKSIZE);
+                    const std::int64_t need_blocks = 1 + data_blocks;
+                    const std::int64_t left = max_blocks - writer.block_no();
+                    if (writer.block_no() > 0 && need_blocks + 2 > left && left < 2) {
+                        if (!rotate_volume(false)) return;
+                    }
+                } else if (writer.block_no() > 0 &&
+                           writer.block_no() + 3 > max_blocks) {
+                    if (!rotate_volume(false)) return;
                 }
-                if (writer.block_no() > 0 &&
-                    writer.block_no() + need_blocks + 2 > max_blocks) {
-                    if (!rotate_volume()) return;
-                }
-            } else if (writer.block_no() > 0 &&
-                       writer.block_no() + 3 > max_blocks) {
-                if (!rotate_volume()) return;
             }
         }
 
@@ -4711,6 +4789,47 @@ static int op_extract(const Config& cfg) {
     if (cfg.multi_volume && !cfg.volno_file.empty())
         extract_vol_num = read_volno_file(cfg.volno_file);
 
+    // Open the next multi-volume archive file and swap the reader stream.
+    // Used both at member boundaries (EOF zeros) and mid-file (short data read).
+    auto switch_extract_volume = [&]() -> bool {
+        std::string cur_vol = make_volume_name(cfg.archive_file, extract_vol_num);
+        if (!run_info_script(cfg, cur_vol, extract_vol_num, "-x"))
+            return false;
+        ++extract_vol_num;
+        if (!cfg.volno_file.empty())
+            write_volno_file(cfg.volno_file, extract_vol_num);
+
+        std::string next_vol = make_volume_name(cfg.archive_file, extract_vol_num);
+        if (::access(next_vol.c_str(), R_OK) != 0) {
+            print(stderr, "mutar: Prepare volume #{} ({}) and press return: ",
+                  extract_vol_num, next_vol);
+            std::fflush(stderr);
+            FILE* tty = std::fopen("/dev/tty", "r");
+            if (!tty) tty = stdin;
+            char dummy_vol[256];
+            if (!std::fgets(dummy_vol, sizeof(dummy_vol), tty)) {
+                print(stderr, "mutar: multi-volume: no more volumes (EOF)\n");
+                if (tty != stdin) std::fclose(tty);
+                return false;
+            }
+            if (tty != stdin) std::fclose(tty);
+        }
+
+        Config next_cfg = cfg;
+        next_cfg.archive_file = next_vol;
+        auto next_res = ArchiveStream::open_read(next_cfg);
+        if (!next_res) {
+            print(stderr, "mutar: cannot open volume {}: {}\n",
+                  next_vol, next_res.error().message);
+            return false;
+        }
+        print(stderr, "mutar: reading volume #{} from {}\n",
+              extract_vol_num, next_vol);
+        s.close();
+        s = std::move(*next_res);
+        reader.swap_stream(s);
+        return true;
+    };
 
     // Seek-based selective extract when index + seekable stream + named members.
     std::vector<IndexEntry> seek_queue;
@@ -4751,47 +4870,10 @@ static int op_extract(const Config& cfg) {
         auto [e, ok, eof] = reader.next_entry();
         if (eof) {
             if (use_index_seek) break; // done with seek queue
-            // Multi-volume: on EOF, open next volume and continue
+            // Multi-volume: on EOF, try next volume; absence is a clean end.
             if (cfg.multi_volume) {
-                std::string cur_vol = make_volume_name(cfg.archive_file, extract_vol_num);
-                if (!run_info_script(cfg, cur_vol, extract_vol_num, "-x")) {
-                    exit_code = EXIT_FAILURE;
+                if (!switch_extract_volume())
                     break;
-                }
-                ++extract_vol_num;
-                if (!cfg.volno_file.empty())
-                    write_volno_file(cfg.volno_file, extract_vol_num);
-
-                std::string next_vol = make_volume_name(cfg.archive_file, extract_vol_num);
-                // Auto-open when the next volume file exists; otherwise prompt once.
-                if (::access(next_vol.c_str(), R_OK) != 0) {
-                    print(stderr, "mutar: Prepare volume #{} ({}) and press return: ",
-                          extract_vol_num, next_vol);
-                    std::fflush(stderr);
-                    FILE* tty = std::fopen("/dev/tty", "r");
-                    if (!tty) tty = stdin;
-                    char dummy_vol[256];
-                    if (!std::fgets(dummy_vol, sizeof(dummy_vol), tty)) {
-                        print(stderr, "mutar: multi-volume: no more volumes (EOF)\n");
-                        if (tty != stdin) std::fclose(tty);
-                        break;
-                    }
-                    if (tty != stdin) std::fclose(tty);
-                }
-
-                Config next_cfg = cfg;
-                next_cfg.archive_file = next_vol;
-                auto next_res = ArchiveStream::open_read(next_cfg);
-                if (!next_res) {
-                    print(stderr, "mutar: cannot open volume {}: {}\n",
-                          next_vol, next_res.error().message);
-                    break;
-                }
-                print(stderr, "mutar: reading volume #{} from {}\n",
-                      extract_vol_num, next_vol);
-                s.close();
-                s = std::move(*next_res);
-                reader.swap_stream(s);
                 continue;
             }
             break;
@@ -5147,7 +5229,9 @@ static int op_extract(const Config& cfg) {
 
             // O_NOFOLLOW + unlink-if-symlink: never write through a symlink
             // (symlink-mediated zip-slip when archive has link then regular).
-            int fd = open_extract_regular(outpath, cfg);
+            // Multi-volume continuation ('M') reopens without truncating.
+            const bool is_mvol = (e.typeflag == GNUTYPE_MULTIVOL);
+            int fd = open_extract_regular(outpath, cfg, /*no_trunc=*/is_mvol);
             if (fd < 0) {
                 print(stderr, "mutar: {}: {}\n", outpath, std::strerror(errno));
                 reader.skip_entry(e);
@@ -5161,10 +5245,69 @@ static int op_extract(const Config& cfg) {
                 std::int64_t real_sz = e.real_size > 0 ? e.real_size : e.size;
                 ::ftruncate(fd, static_cast<off_t>(real_sz));
                 reader.extract_sparse_data(e, fd);
+                total_bytes += e.size;
             } else {
-                reader.read_entry_data(e, fd);
+                // Regular / multi-volume: first fragment has size=full; 'M' has
+                // size=remaining and multivol_offset into the file.
+                std::int64_t bytes_done = is_mvol ? e.multivol_offset : 0;
+                if (is_mvol && e.multivol_offset > 0)
+                    ::lseek(fd, static_cast<off_t>(e.multivol_offset), SEEK_SET);
+
+                const std::int64_t start_off = bytes_done;
+                Entry cur = e;
+                for (;;) {
+                    std::int64_t got = 0;
+                    if (!reader.read_entry_data(cur, fd, {}, &got)) {
+                        print(stderr, "mutar: {}: write error during extract\n", outpath);
+                        exit_code = EXIT_FAILURE;
+                        break;
+                    }
+                    bytes_done += got;
+                    if (got >= cur.asize)
+                        break; // this fragment complete
+
+                    // Short read (or header-only volume): need next multi-vol part
+                    if (!cfg.multi_volume) {
+                        print(stderr,
+                              "mutar: {}: unexpected EOF in archive (got {} of {} bytes)\n",
+                              outpath, got, cur.asize);
+                        exit_code = EXIT_FAILURE;
+                        break;
+                    }
+                    if (!switch_extract_volume()) {
+                        print(stderr,
+                              "mutar: {}: multi-volume: need next volume "
+                              "(have {} bytes so far)\n",
+                              outpath, bytes_done);
+                        exit_code = EXIT_FAILURE;
+                        break;
+                    }
+                    auto [e2, ok2, eof2] = reader.next_entry();
+                    if (eof2 || !ok2) {
+                        print(stderr,
+                              "mutar: {}: multi-volume: missing continuation header\n",
+                              outpath);
+                        exit_code = EXIT_FAILURE;
+                        break;
+                    }
+                    if (e2.typeflag != GNUTYPE_MULTIVOL) {
+                        print(stderr,
+                              "mutar: {}: multi-volume: expected type 'M' continuation, "
+                              "got typeflag '{}'\n",
+                              outpath, e2.typeflag ? e2.typeflag : '?');
+                        exit_code = EXIT_FAILURE;
+                        break;
+                    }
+                    if (e2.multivol_offset != bytes_done) {
+                        ::lseek(fd, static_cast<off_t>(e2.multivol_offset), SEEK_SET);
+                        bytes_done = e2.multivol_offset;
+                    }
+                    cur = std::move(e2);
+                }
+                if (bytes_done > start_off)
+                    ::ftruncate(fd, static_cast<off_t>(bytes_done));
+                total_bytes += (bytes_done - start_off);
             }
-            total_bytes += e.size;
             set_running_total(total_bytes);
             ::close(fd);
 

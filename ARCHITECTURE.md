@@ -214,7 +214,8 @@ process and reading `#1 in mutar::pax_append` directly from the backtrace.
 - **xattrs / ACLs**: store/restore via PAX `SCHILY.xattr.*` / `SCHILY.acl.*` when `MUTAR_HAVE_XATTR` / `MUTAR_HAVE_ACL`; SELinux never stored
 - **Incremental backups** (`-G -g`): `--level=0` done; full snapshot state file not yet maintained
 - **Remote tape** (`--rsh/rmt-command`): `rmt` protocol not wired
-- **Multi-volume** (`-M`): volume switching not implemented
+- **Multi-volume** (`-M -L`): between-member rotation + mid-file split via
+  `GNUTYPE_MULTIVOL` (`'M'`) with oldgnu offset field; extract reassembly
 - **PAX sparse write**: sparse data currently written as GNU 'S' format only; PAX extended-header sparse map format not yet emitted
 - **`--pax-option`**: full GNU set — `delete=PATTERN` (fnmatch), `exthdr.name`/`exthdr.mtime`,
   `globexthdr.name`/`globexthdr.mtime`, `keyword=value` (global `'g'` header), `keyword:=value`

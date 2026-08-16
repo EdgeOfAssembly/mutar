@@ -330,7 +330,7 @@ Report after each phase: commits, tests+exit codes, residual gaps.
 - [ ] G1.3 `-s` / preserve-order  
 - [x] G1.4 `-G` incremental  
 - [x] G1.5 `-g` listed-incremental complete  
-- [ ] G1.6 mid-file multi-volume  
+- [x] G1.6 mid-file multi-volume  
 - [ ] G1.7 rmt lseek + remote append  
 - [ ] G1.8–G1.11 unquote, verbatim, ignore-command-error, quote-chars  
 - [x] G1.12 exclude-ignore*  

@@ -131,7 +131,7 @@ See `COMPATIBILITY_PROGRESS.md` for the full option audit. Short list matching c
 - SELinux (`--selinux` / `--no-selinux`) — policy-unsupported no-op + warning
 
 **Partial (do not claim complete):**
-- Multi-volume (`-M -L`): between-member create/extract + stream swap; mid-file split not supported
+- Multi-volume (`-M -L`): between-member + mid-file split (`GNUTYPE_MULTIVOL` 'M'); extract reassembly
 - rmt: O/R/W/C bridge works; lseek (`S`) / remote append not implemented
 - `-s` / `--preserve-order` — accepted with not-implemented warning
 

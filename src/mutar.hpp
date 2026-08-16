@@ -415,6 +415,9 @@ struct Entry {
     std::int64_t real_size       = 0;
     std::vector<SparseMap> sparse_map;
 
+    // Multi-volume continuation (GNUTYPE_MULTIVOL 'M'): byte offset into file
+    std::int64_t multivol_offset = 0;
+
     // PAX extended attributes (includes SCHILY.xattr.* / SCHILY.acl.* on create)
     std::map<std::string, std::string> pax_attrs;
 

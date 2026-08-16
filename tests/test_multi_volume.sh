@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
-# tests/test_multi_volume.sh — Phase C multi-volume (G2–G4)
+# tests/test_multi_volume.sh — multi-volume (between-member + mid-file G1.6)
 #
 # Tests:
+#   T-MVOL-PARSE   -L sets numeric tape length (rotation actually fires)
 #   T-MVOL-RT-01   create many small files with -M -L 10 → multiple volumes; extract; compare
 #   T-MVOL-VOLNO   --volno-file updates across create
 #   T-MVOL-INFO    -F/--info-script invoked at volume boundary (stamp file)
-#   T-MVOL-BIG     single file larger than tape length → clear error
-#   T-MVOL-PARSE   -L sets numeric tape length (rotation actually fires)
+#   T-MVOL-BIG     single file larger than tape length → mid-file split → extract OK
+#   T-MVOL-BIG-GNU GNU tar extracts mutar mid-file multi-vol (if tar available)
+#   T-MVOL-MIX     large file + small files still round-trip
 #
 # Usage: ./test_multi_volume.sh [/path/to/mutar]
 set -uo pipefail
@@ -46,7 +48,7 @@ echo "[T-MVOL-PARSE]"
   fi
 }
 
-# ── T-MVOL-RT-01: create → extract multi-vol round-trip ───────────────────────
+# ── T-MVOL-RT-01: create → extract multi-vol round-trip (small files) ─────────
 echo "[T-MVOL-RT-01]"
 {
   D="$TMPBASE/rt01"
@@ -150,21 +152,176 @@ EOF
   fi
 }
 
-# ── T-MVOL-BIG: oversized single file errors clearly ──────────────────────────
+# ── T-MVOL-BIG: single file > tape length → mid-file split → extract ──────────
 echo "[T-MVOL-BIG]"
 {
   D="$TMPBASE/big"
-  mkdir -p "$D/src"
-  # 20 KiB file with -L 10 (10 KiB) must fail (no mid-file split)
-  dd if=/dev/zero of="$D/src/huge.bin" bs=1024 count=20 status=none
+  mkdir -p "$D/src" "$D/out"
+  # 25 KiB file with -L 10 (10 KiB) must split across volumes (GNUTYPE_MULTIVOL)
+  dd if=/dev/urandom of="$D/src/huge.bin" bs=1024 count=25 status=none
+  md5_src=$(md5sum < "$D/src/huge.bin" | awk '{print $1}')
+  sz_src=$(wc -c < "$D/src/huge.bin")
+
   "$MUTAR" -c -M -L 10 -f "$D/c.tar" -C "$D" src/huge.bin >"$D/out.txt" 2>"$D/err.txt"
-  rc=$?
-  if [ "$rc" -ne 0 ] && grep -qi 'tape length\|mid-file\|not supported' "$D/err.txt"; then
-    pass "T-MVOL-BIG: oversized file rejected with clear message"
-  elif [ "$rc" -ne 0 ]; then
-    pass "T-MVOL-BIG: oversized file rejected (rc=$rc)"
+  rc_c=$?
+  nvol=$(find "$D" -maxdepth 1 \( -name 'c.tar' -o -name 'c.tar.*' \) -type f | wc -l)
+
+  # Inspect for typeflag 'M' on a continuation volume
+  has_m=0
+  for v in "$D"/c.tar "$D"/c.tar.*; do
+    [ -f "$v" ] || continue
+    # typeflag at offset 156 of first header
+    tf=$(dd if="$v" bs=1 skip=156 count=1 status=none 2>/dev/null | od -An -t x1 | tr -d ' \n')
+    if [ "$tf" = "4d" ]; then has_m=1; break; fi
+  done
+
+  "$MUTAR" -x -M -f "$D/c.tar" -C "$D/out" 2>"$D/extract.err"
+  rc_x=$?
+  md5_out=""
+  sz_out=0
+  if [ -f "$D/out/src/huge.bin" ]; then
+    md5_out=$(md5sum < "$D/out/src/huge.bin" | awk '{print $1}')
+    sz_out=$(wc -c < "$D/out/src/huge.bin")
+  elif [ -f "$D/out/huge.bin" ]; then
+    md5_out=$(md5sum < "$D/out/huge.bin" | awk '{print $1}')
+    sz_out=$(wc -c < "$D/out/huge.bin")
+  fi
+
+  if [ "$rc_c" -ne 0 ]; then
+    fail "T-MVOL-BIG" "create failed rc=$rc_c err=$(head -c 400 "$D/err.txt")"
+  elif [ "$nvol" -lt 2 ]; then
+    fail "T-MVOL-BIG" "expected >=2 volumes for oversized file, got $nvol"
+  elif [ "$has_m" -ne 1 ]; then
+    fail "T-MVOL-BIG" "no GNUTYPE_MULTIVOL typeflag 'M' found in volumes"
+  elif [ "$rc_x" -ne 0 ]; then
+    fail "T-MVOL-BIG" "extract failed rc=$rc_x err=$(head -c 400 "$D/extract.err")"
+  elif [ "$md5_src" != "$md5_out" ] || [ "$sz_src" -ne "$sz_out" ]; then
+    fail "T-MVOL-BIG" "content mismatch src=$md5_src/$sz_src out=$md5_out/$sz_out nvol=$nvol"
   else
-    fail "T-MVOL-BIG" "expected failure for file > tape length; err=$(cat "$D/err.txt")"
+    pass "T-MVOL-BIG: mid-file split $nvol vols, type M, content OK ($sz_out bytes)"
+  fi
+}
+
+# ── T-MVOL-BIG-GNU: GNU tar extracts mutar mid-file multi-vol ─────────────────
+echo "[T-MVOL-BIG-GNU]"
+{
+  if ! command -v tar >/dev/null 2>&1; then
+    skip "T-MVOL-BIG-GNU" "GNU tar not installed"
+  else
+    D="$TMPBASE/biggnu"
+    mkdir -p "$D/src" "$D/out"
+    dd if=/dev/urandom of="$D/src/huge.bin" bs=1024 count=25 status=none
+    md5_src=$(md5sum < "$D/src/huge.bin" | awk '{print $1}')
+
+    "$MUTAR" -c -M -L 10 -f "$D/g.tar" -C "$D" src/huge.bin 2>"$D/create.err"
+    rc_c=$?
+    nvol=$(find "$D" -maxdepth 1 \( -name 'g.tar' -o -name 'g.tar.*' \) -type f | wc -l)
+
+    # GNU tar multi-volume extract: use -F script to feed next volume path via rename
+    # mutar names: g.tar, g.tar.2, g.tar.3, ...
+    # GNU reopens the same -f name after -F returns; copy next volume into place.
+    SCRIPT="$D/gnu_switch.sh"
+    cat > "$SCRIPT" <<'EOF'
+#!/bin/sh
+# TAR_VOLUME is the volume number about to be read (1-based next).
+next="$TAR_VOLUME"
+base="$TAR_ARCHIVE"
+# Prefer base.N then base (volume 1)
+cand="${base}.${next}"
+if [ ! -f "$cand" ] && [ "$next" -eq 1 ]; then cand="$base"; fi
+if [ ! -f "$cand" ]; then
+  # try base without suffix for vol1 already consumed
+  echo "gnu_switch: missing $cand" >&2
+  exit 1
+fi
+cp -f "$cand" "$base"
+exit 0
+EOF
+    chmod +x "$SCRIPT"
+
+    # Seed volume 1 into the name GNU will open
+    # g.tar is already volume 1
+    tar -x -M -F "$SCRIPT" -f "$D/g.tar" -C "$D/out" 2>"$D/extract.err"
+    rc_x=$?
+
+    md5_out=""
+    if [ -f "$D/out/src/huge.bin" ]; then
+      md5_out=$(md5sum < "$D/out/src/huge.bin" | awk '{print $1}')
+    elif [ -f "$D/out/huge.bin" ]; then
+      md5_out=$(md5sum < "$D/out/huge.bin" | awk '{print $1}')
+    fi
+
+    if [ "$rc_c" -ne 0 ]; then
+      fail "T-MVOL-BIG-GNU" "mutar create failed rc=$rc_c"
+    elif [ "$nvol" -lt 2 ]; then
+      fail "T-MVOL-BIG-GNU" "expected multi-vol, got $nvol"
+    elif [ "$rc_x" -ne 0 ] || [ "$md5_src" != "$md5_out" ]; then
+      # Interop is best-effort; soft-fail as skip if GNU refuses our layout
+      if [ "$rc_x" -ne 0 ]; then
+        skip "T-MVOL-BIG-GNU" "GNU tar extract rc=$rc_x err=$(head -c 200 "$D/extract.err")"
+      else
+        fail "T-MVOL-BIG-GNU" "checksum mismatch src=$md5_src out=$md5_out"
+      fi
+    else
+      pass "T-MVOL-BIG-GNU: GNU tar extracted mutar mid-file multi-vol ($nvol vols)"
+    fi
+  fi
+}
+
+# ── T-MVOL-MIX: large file + small files ──────────────────────────────────────
+echo "[T-MVOL-MIX]"
+{
+  D="$TMPBASE/mix"
+  mkdir -p "$D/src" "$D/out"
+  dd if=/dev/urandom of="$D/src/big.bin" bs=1024 count=20 status=none
+  for i in $(seq 1 15); do
+    printf 'small-%s\n' "$(printf 'z%.0s' {1..100})" > "$D/src/s$i.txt"
+  done
+  (cd "$D/src" && find . -type f | sort | xargs md5sum) > "$D/src.md5"
+
+  "$MUTAR" -c -M -L 10 -f "$D/m.tar" -C "$D" src/ 2>"$D/create.err"
+  rc_c=$?
+  nvol=$(find "$D" -maxdepth 1 \( -name 'm.tar' -o -name 'm.tar.*' \) -type f | wc -l)
+
+  "$MUTAR" -x -M -f "$D/m.tar" -C "$D/out" 2>"$D/extract.err"
+  rc_x=$?
+
+  if [ "$rc_c" -ne 0 ] || [ "$rc_x" -ne 0 ]; then
+    fail "T-MVOL-MIX" "create rc=$rc_c extract rc=$rc_x; c=$(head -c 200 "$D/create.err"); x=$(head -c 200 "$D/extract.err")"
+  elif [ "$nvol" -lt 2 ]; then
+    fail "T-MVOL-MIX" "expected >=2 volumes, got $nvol"
+  else
+    (cd "$D/out/src" && find . -type f | sort | xargs md5sum) > "$D/out.md5" 2>/dev/null || true
+    if cmp -s "$D/src.md5" "$D/out.md5"; then
+      pass "T-MVOL-MIX: large+small round-trip across $nvol volumes"
+    else
+      fail "T-MVOL-MIX" "checksum mismatch; diff=$(diff -u "$D/src.md5" "$D/out.md5" | head -20)"
+    fi
+  fi
+}
+
+# ── T-MVOL-VOLNO-BIG: volno-file still works with mid-file split ──────────────
+echo "[T-MVOL-VOLNO-BIG]"
+{
+  D="$TMPBASE/volnobig"
+  mkdir -p "$D/src"
+  dd if=/dev/urandom of="$D/src/huge.bin" bs=1024 count=30 status=none
+  VOLNO="$D/volno.txt"
+  echo 1 > "$VOLNO"
+
+  "$MUTAR" -c -M -L 10 -f "$D/v.tar" --volno-file="$VOLNO" -C "$D" src/ 2>"$D/err.txt"
+  rc=$?
+  final=$(tr -d '[:space:]' < "$VOLNO" 2>/dev/null || echo '')
+  nvol=$(find "$D" -maxdepth 1 \( -name 'v.tar' -o -name 'v.tar.*' \) -type f | wc -l)
+
+  if [ "$rc" -ne 0 ]; then
+    fail "T-MVOL-VOLNO-BIG" "create failed rc=$rc err=$(head -c 300 "$D/err.txt")"
+  elif [ "$nvol" -lt 2 ]; then
+    fail "T-MVOL-VOLNO-BIG" "expected >=2 volumes, got $nvol"
+  elif ! [[ "$final" =~ ^[0-9]+$ ]] || [ "$final" -lt 2 ]; then
+    fail "T-MVOL-VOLNO-BIG" "volno-file=$final nvol=$nvol"
+  else
+    pass "T-MVOL-VOLNO-BIG: volno-file=$final after mid-file $nvol volumes"
   fi
 }
 

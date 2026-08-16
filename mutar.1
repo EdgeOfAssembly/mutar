@@ -156,9 +156,12 @@ Rotate volume after approximately
 .IR N "×1024"
 bytes (implies
 .BR \-M ).
-Rotation is
-.B between members
-only; mid-file split across volumes is not supported.
+Rotation is between members and mid-file: a single regular file larger than the
+remaining tape capacity is split with GNU
+.B GNUTYPE_MULTIVOL
+(typeflag
+.BR M )
+continuation headers (offset in the oldgnu header field).
 .TP
 .BI \-F " SCRIPT" "\fR, \fB\-\-info\-script=" SCRIPT
 Run
@@ -218,8 +221,9 @@ exthdr.name/mtime, globexthdr.name/mtime,
 .BR keyword= / :=
 overrides).
 .IP \(bu 3
-Multi-volume supports between-member create/extract and volume scripts;
-mid-file continuation is not implemented.
+Multi-volume supports between-member and mid-file create/extract
+.RB ( GNUTYPE_MULTIVOL )
+plus volume scripts; sparse mid-file split is not implemented.
 .IP \(bu 3
 Remote tape
 .RB ( rmt )
@@ -284,9 +288,8 @@ Project documentation:
 See
 .I COMPATIBILITY_PROGRESS.md
 in the source tree for the option-by-option audit.
-Known limitations include partial multi-volume mid-file split, partial
-.BR \-\-pax\-option ,
-unsupported SELinux, and compressed seek that materializes before seeking.
+Known limitations include unsupported SELinux, partial rmt (no remote lseek),
+and compressed seek that materializes before seeking.
 .PP
 Report issues at
 .IR https://github.com/EdgeOfAssembly/mutar .
