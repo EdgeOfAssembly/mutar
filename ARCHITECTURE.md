@@ -1,9 +1,9 @@
-# ARCHITECTURE.md — star C++23 design notes
+# ARCHITECTURE.md — µtar (mutar) C++23 design notes
 
 ## Overview
 
-`star` is a single-translation-unit C++23 implementation (~3990 LOC across
-`star.hpp` + `star.cpp`). It is structured in clean layers with no external
+`mutar` is a single-translation-unit C++23 implementation (~3990 LOC across
+`mutar.hpp` + `mutar.cpp`). It is structured in clean layers with no external
 dependencies beyond POSIX and the C++23 standard library.
 
 ## Layer Stack
@@ -20,7 +20,7 @@ BlockBuffer  (record-aligned I/O, blocking factor)
 ArchiveStream  (fd + optional compression child process)
 ```
 
-## Key Types (star.hpp)
+## Key Types (mutar.hpp)
 
 | Type | Purpose |
 |------|---------|
@@ -207,7 +207,7 @@ Per `ubuntu-gdb-max-debug-best-practices.txt`:
 DWARF 5 + full variable tracking gives the richest possible GDB experience.
 The `pax_append` infinite-loop bug (infinite `while` before the convergence
 `for(;;)`) was caught in under 60 seconds by attaching GDB to the hanging
-process and reading `#1 in star::pax_append` directly from the backtrace.
+process and reading `#1 in mutar::pax_append` directly from the backtrace.
 
 ## Known Gaps (Future PRs)
 
@@ -223,7 +223,7 @@ process and reading `#1 in star::pax_append` directly from the backtrace.
 
 ## Changes in PR #170
 
-### New `Config` Fields (star.hpp)
+### New `Config` Fields (mutar.hpp)
 
 PR #170 added the following fields to the `Config` struct:
 
@@ -329,7 +329,7 @@ The following options are **accepted and parsed but not yet behaviorally wired**
 |--------|--------|
 | `-s` / `--preserve-order` | Flag stored; emits a "not implemented" warning; directory ordering is controlled only by `--sort` |
 | `--overwrite-dir` / `--no-overwrite-dir` | ✅ PR #172: fully wired in DIRTYPE extraction case |
-| `--warning=KEYWORD` | ✅ PR #172: `star_warn()` helper wired at key emission sites |
+| `--warning=KEYWORD` | ✅ PR #172: `mutar_warn()` helper wired at key emission sites |
 
 ---
 
@@ -363,7 +363,7 @@ extracted correctly.
   `rename`.
 
 The snapshot format is line-oriented (`name<TAB>mtime_sec`) with a
-`STAR_SNAPSHOT_V1` header, making it human-readable and grep-friendly.
+`MUTAR_SNAPSHOT_V1` header, making it human-readable and grep-friendly.
 
 ### Remote archive (rmt) bridge
 
@@ -382,13 +382,13 @@ don't require `waitpid`).
 
 ### Warning emission system
 
-`star_warn(cfg, category, msg)` is a free function that:
+`mutar_warn(cfg, category, msg)` is a free function that:
 1. Returns immediately if `cfg.warn_none`.
 2. Emits unconditionally if `cfg.warn_all`.
 3. Checks `warnings_disabled` (set) — if `category` is in the set, suppress.
 4. Emits if `warnings_enabled` is empty (default) or contains `category`.
 
-Existing `print(stderr, ...)` warning sites were replaced with `star_warn(...)`
+Existing `print(stderr, ...)` warning sites were replaced with `mutar_warn(...)`
 at: walk_dir lstat failure (`failed-read`), --newer filter skip (`newer`),
 --check-links missing link (`missing-links`), --one-file-system skip (`xdev`).
 

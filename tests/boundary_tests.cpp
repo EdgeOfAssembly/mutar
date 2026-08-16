@@ -1,12 +1,12 @@
 // boundary_tests.cpp — Integer overflow/underflow, off-by-one, and memory
-// safety tests for star's core numeric and buffer-handling functions.
+// safety tests for mutar's core numeric and buffer-handling functions.
 //
 // Compiled with -fsanitize=address,undefined so every UB/overflow/OOB access
 // triggers an immediate, attributable error.
 //
-// Build (handled by CMakeLists.txt target 'star_boundary_tests'):
+// Build (handled by CMakeLists.txt target 'mutar_boundary_tests'):
 //   cmake -DCMAKE_BUILD_TYPE=Debug ..
-//   make star_boundary_tests
+//   make mutar_boundary_tests
 //
 // Run standalone (example, no CMake):
 //   g++ -std=c++23 -fsanitize=address,undefined -fno-omit-frame-pointer
@@ -15,7 +15,7 @@
 //
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-#include "../src/star.hpp"
+#include "../src/mutar.hpp"
 
 #include <cassert>
 #include <cstdint>
@@ -53,7 +53,7 @@ static int g_fail = 0;
 // ─── 1. read_octal — zero-length, all-NUL, overflow digits ───────────────────
 
 static void test_read_octal() {
-    using star::read_octal;
+    using mutar::read_octal;
 
     // Empty field → 0 (no OOB read)
     CHECK_EQ(read_octal(""), 0ULL);
@@ -85,8 +85,8 @@ static void test_read_octal() {
 // ─── 2. read_base256 — marker bit masking, sign, all-zeros, boundary values ──
 
 static void test_read_base256() {
-    using star::read_base256;
-    using star::is_base256;
+    using mutar::read_base256;
+    using mutar::is_base256;
 
     // Build a 12-byte base-256 field for value 8 GiB (8 589 934 592)
     // = 0x0000000200000000. In a 12-byte big-endian field (byte 0 = marker),
@@ -153,7 +153,7 @@ static void test_read_base256() {
 // ─── 3. write_octal — off-by-one in field width, value zero, near-overflow ───
 
 static void test_write_octal() {
-    using star::write_octal;
+    using mutar::write_octal;
 
     // Width=8, value=0 → "0000000\0"
     {
@@ -175,7 +175,7 @@ static void test_write_octal() {
         char buf[12] = {};
         write_octal(buf, 12, 077777777777ULL);
         // Parse back and confirm round-trip
-        auto back = star::read_octal(std::string_view(buf, 12));
+        auto back = mutar::read_octal(std::string_view(buf, 12));
         CHECK_EQ(back, 077777777777ULL);
     }
 
@@ -201,9 +201,9 @@ static void test_write_octal() {
 // ─── 4. write_base256 — marker bit set, width boundary, round-trip ───────────
 
 static void test_write_base256() {
-    using star::write_base256;
-    using star::read_base256;
-    using star::is_base256;
+    using mutar::write_base256;
+    using mutar::read_base256;
+    using mutar::is_base256;
 
     // 8 GiB round-trip
     {
@@ -242,7 +242,7 @@ static void test_write_base256() {
 // ─── 5. block_checksum / valid_checksum — all-zero block, all-0xFF block ─────
 
 static void test_checksum() {
-    using namespace star;
+    using namespace mutar;
 
     // All-zero block has known checksum = 8 * ' ' = 8 * 32 = 256
     {
@@ -301,7 +301,7 @@ static void test_checksum() {
 
 // Helper: write bytes to a tmp file, return path
 static std::string write_tmp(const std::string& data) {
-    char tmpl[] = "/tmp/star_bt_XXXXXX";
+    char tmpl[] = "/tmp/mutar_bt_XXXXXX";
     int fd = ::mkstemp(tmpl);
     assert(fd >= 0);
     assert(::write(fd, data.data(), data.size()) == static_cast<ssize_t>(data.size()));
@@ -309,18 +309,18 @@ static std::string write_tmp(const std::string& data) {
     return tmpl;
 }
 
-// Run star with given args, return exit code and captured stdout/stderr
+// Run mutar with given args, return exit code and captured stdout/stderr
 static int run_star(const std::vector<std::string>& args,
                     std::string* out = nullptr) {
-    static const char* STAR = nullptr;
-    if (!STAR) {
+    static const char* MUTAR = nullptr;
+    if (!MUTAR) {
         // Try standard build location
-        if (::access("./star", X_OK) == 0) STAR = "./star";
-        else if (::access("../build/star", X_OK) == 0) STAR = "../build/star";
-        else STAR = "star";
+        if (::access("./mutar", X_OK) == 0) MUTAR = "./mutar";
+        else if (::access("../build/mutar", X_OK) == 0) MUTAR = "../build/mutar";
+        else MUTAR = "mutar";
     }
 
-    std::string cmd = std::string(STAR);
+    std::string cmd = std::string(MUTAR);
     for (const auto& a : args) cmd += " " + a;
 
     if (out) {
@@ -342,7 +342,7 @@ static void test_pax_long_name() {
     longname += ".txt";
 
     // Create temp dir and file
-    char tmpdir[] = "/tmp/star_bt_dir_XXXXXX";
+    char tmpdir[] = "/tmp/mutar_bt_dir_XXXXXX";
     assert(::mkdtemp(tmpdir) != nullptr);
     std::string filepath = std::string(tmpdir) + "/" + longname;
     {
@@ -365,7 +365,7 @@ static void test_pax_long_name() {
     CHECK(listing.find(longname) != std::string::npos);
 
     // Extract and verify
-    char outdir[] = "/tmp/star_bt_out_XXXXXX";
+    char outdir[] = "/tmp/mutar_bt_out_XXXXXX";
     assert(::mkdtemp(outdir) != nullptr);
     rc = run_star({"-xf", archive, "-C", outdir});
     CHECK_EQ(rc, 0);
@@ -384,16 +384,16 @@ static void test_pax_long_name() {
 // ─── 7. sanitize_path — path traversal edge cases ─────────────────────────────
 
 // Call sanitize_path via round-trip through an archive with a traversal name,
-// and confirm star refuses to extract outside the destination.
+// and confirm mutar refuses to extract outside the destination.
 static void test_sanitize_path_traversal() {
-    // We'll synthesise a raw tar block with a traversal path and check star
+    // We'll synthesise a raw tar block with a traversal path and check mutar
     // extracts it safely (within extract dir, not outside).
 
     // Build a minimal ustar archive with entry named "../../evil.txt"
     char block[512 * 4] = {};
 
     // Header block
-    auto* h = reinterpret_cast<star::PosixHeader*>(block);
+    auto* h = reinterpret_cast<mutar::PosixHeader*>(block);
     std::strncpy(h->name, "../../evil.txt", sizeof(h->name) - 1);
     std::memcpy(h->mode,  "0000644", 7);   // tar octal field, no NUL needed
     std::memcpy(h->uid,   "0001750", 7);
@@ -406,9 +406,9 @@ static void test_sanitize_path_traversal() {
 
     // Checksum
     {
-        star::Block blk;
+        mutar::Block blk;
         std::memcpy(blk.buffer, block, 512);
-        star::write_checksum(blk);
+        mutar::write_checksum(blk);
         std::memcpy(block, blk.buffer, 512);
     }
 
@@ -420,7 +420,7 @@ static void test_sanitize_path_traversal() {
 
     std::string archive = write_tmp(std::string(block, 512 * 4));
 
-    char outdir[] = "/tmp/star_bt_trav_XXXXXX";
+    char outdir[] = "/tmp/mutar_bt_trav_XXXXXX";
     assert(::mkdtemp(outdir) != nullptr);
 
     // star should extract, but NOT to ../../evil.txt outside outdir
@@ -435,13 +435,13 @@ static void test_sanitize_path_traversal() {
 
     // Cleanup
     ::unlink(archive.c_str());
-    // Remove any file star may have created inside outdir
+    // Remove any file mutar may have created inside outdir
     (void)::system(("rm -rf " + std::string(outdir)).c_str());
 }
 
 // ─── 8. BlockBuffer — blocking_factor boundary (1, 32767, 0 exit) ────────────
-// We can't directly instantiate BlockBuffer here (it's in the star namespace
-// inside star.cpp), but we test via CLI: -b 0 must fail fast, -b 1 must work.
+// We can't directly instantiate BlockBuffer here (it's in the mutar namespace
+// inside mutar.cpp), but we test via CLI: -b 0 must fail fast, -b 1 must work.
 
 static void test_blocking_factor_validation() {
     // -b 0 → must fail (exit != 0)
@@ -471,7 +471,7 @@ static void test_blocking_factor_validation() {
 
     // -b 1 → valid, creating an archive should succeed
     {
-        char tmpdir[] = "/tmp/star_bt_bf_XXXXXX";
+        char tmpdir[] = "/tmp/mutar_bt_bf_XXXXXX";
         assert(::mkdtemp(tmpdir) != nullptr);
         std::string archive = std::string(tmpdir) + "/t.tar";
         std::string infile  = std::string(tmpdir) + "/f.txt";
@@ -486,10 +486,10 @@ static void test_blocking_factor_validation() {
 }
 
 // ─── 9. strip_components — off-by-one: n=0, n=depth, n>depth ─────────────────
-// strip_components is static in star.cpp; test via CLI --strip-components.
+// strip_components is static in mutar.cpp; test via CLI --strip-components.
 
 static void test_strip_components() {
-    char tmpdir[] = "/tmp/star_bt_sc_XXXXXX";
+    char tmpdir[] = "/tmp/mutar_bt_sc_XXXXXX";
     assert(::mkdtemp(tmpdir) != nullptr);
 
     // Create a/b/c/file.txt
@@ -511,7 +511,7 @@ static void test_strip_components() {
 
     // strip-components=0 → exact path preserved
     {
-        char od[] = "/tmp/star_bt_sc0_XXXXXX";
+        char od[] = "/tmp/mutar_bt_sc0_XXXXXX";
         assert(::mkdtemp(od) != nullptr);
         run_star({"-xf", archive, "-C", od, "--strip-components=0"});
         CHECK_EQ(::access((std::string(od)+"/a/b/c/file.txt").c_str(), F_OK), 0);
@@ -520,7 +520,7 @@ static void test_strip_components() {
 
     // strip-components=1 → b/c/file.txt
     {
-        char od[] = "/tmp/star_bt_sc1_XXXXXX";
+        char od[] = "/tmp/mutar_bt_sc1_XXXXXX";
         assert(::mkdtemp(od) != nullptr);
         run_star({"-xf", archive, "-C", od, "--strip-components=1"});
         CHECK_EQ(::access((std::string(od)+"/b/c/file.txt").c_str(), F_OK), 0);
@@ -529,7 +529,7 @@ static void test_strip_components() {
 
     // strip-components=3 → file.txt directly in outdir
     {
-        char od[] = "/tmp/star_bt_sc3_XXXXXX";
+        char od[] = "/tmp/mutar_bt_sc3_XXXXXX";
         assert(::mkdtemp(od) != nullptr);
         run_star({"-xf", archive, "-C", od, "--strip-components=3"});
         CHECK_EQ(::access((std::string(od)+"/file.txt").c_str(), F_OK), 0);
@@ -538,7 +538,7 @@ static void test_strip_components() {
 
     // strip-components=4 → deeper than path; file must NOT appear (off-by-one)
     {
-        char od[] = "/tmp/star_bt_sc4_XXXXXX";
+        char od[] = "/tmp/mutar_bt_sc4_XXXXXX";
         assert(::mkdtemp(od) != nullptr);
         run_star({"-xf", archive, "-C", od, "--strip-components=4"});
         CHECK_EQ(::access((std::string(od)+"/file.txt").c_str(), F_OK), -1);
@@ -551,7 +551,7 @@ static void test_strip_components() {
 // ─── 10. Large-file size field encoding — 8 GiB boundary (base-256 trigger) ──
 
 static void test_size_field_boundary() {
-    using namespace star;
+    using namespace mutar;
 
     // write_number (octal) can represent up to 077777777777 = 8589934591 bytes.
     // Values above that must use base-256. Test the exact boundary.
@@ -592,7 +592,7 @@ static void test_empty_archive() {
     char blocks[1024] = {};
     std::string archive = write_tmp(std::string(blocks, 1024));
 
-    char od[] = "/tmp/star_bt_empty_XXXXXX";
+    char od[] = "/tmp/mutar_bt_empty_XXXXXX";
     assert(::mkdtemp(od) != nullptr);
 
     int rc = run_star({"-xf", archive, "-C", od});
@@ -610,7 +610,7 @@ static void test_empty_archive() {
 // ─── 12. Binary integrity — arbitrary byte values round-trip without corruption
 
 static void test_binary_roundtrip() {
-    char tmpdir[] = "/tmp/star_bt_bin_XXXXXX";
+    char tmpdir[] = "/tmp/mutar_bt_bin_XXXXXX";
     assert(::mkdtemp(tmpdir) != nullptr);
 
     // Create a 512-byte file with every byte value 0x00..0xFF repeated twice
@@ -627,7 +627,7 @@ static void test_binary_roundtrip() {
     std::string archive = std::string(tmpdir) + "/t.tar";
     run_star({"-cf", archive, "-C", tmpdir, "binary.bin"});
 
-    char od[] = "/tmp/star_bt_binout_XXXXXX";
+    char od[] = "/tmp/mutar_bt_binout_XXXXXX";
     assert(::mkdtemp(od) != nullptr);
     run_star({"-xf", archive, "-C", od});
 
@@ -653,7 +653,7 @@ static void test_binary_roundtrip() {
 
 static void test_block_boundary_files() {
     for (std::size_t sz : {511UL, 512UL, 513UL, 1023UL, 1024UL, 1025UL}) {
-        char tmpdir[] = "/tmp/star_bt_blk_XXXXXX";
+        char tmpdir[] = "/tmp/mutar_bt_blk_XXXXXX";
         assert(::mkdtemp(tmpdir) != nullptr);
 
         std::string infile = std::string(tmpdir) + "/f";
@@ -668,7 +668,7 @@ static void test_block_boundary_files() {
         int rc = run_star({"-cf", archive, "-C", tmpdir, "f"});
         CHECK_EQ(rc, 0);
 
-        char od[] = "/tmp/star_bt_blkout_XXXXXX";
+        char od[] = "/tmp/mutar_bt_blkout_XXXXXX";
         assert(::mkdtemp(od) != nullptr);
         rc = run_star({"-xf", archive, "-C", od});
         CHECK_EQ(rc, 0);
@@ -688,7 +688,7 @@ static void test_block_boundary_files() {
 static void test_uid_gid_overflow() {
     // We test that large uid/gid values round-trip without truncation.
     // With PAX format they get stored as decimal strings.
-    char tmpdir[] = "/tmp/star_bt_ugid_XXXXXX";
+    char tmpdir[] = "/tmp/mutar_bt_ugid_XXXXXX";
     assert(::mkdtemp(tmpdir) != nullptr);
 
     std::string infile = std::string(tmpdir) + "/f.txt";
@@ -713,7 +713,7 @@ static void test_uid_gid_overflow() {
 // ─── 15. --strip-components=INT_MAX — must not wrap around or OOB ────────────
 
 static void test_strip_components_extremes() {
-    char tmpdir[] = "/tmp/star_bt_scx_XXXXXX";
+    char tmpdir[] = "/tmp/mutar_bt_scx_XXXXXX";
     assert(::mkdtemp(tmpdir) != nullptr);
     std::string infile = std::string(tmpdir) + "/f.txt";
     {
@@ -723,7 +723,7 @@ static void test_strip_components_extremes() {
     std::string archive = std::string(tmpdir) + "/t.tar";
     run_star({"-cf", archive, "-C", tmpdir, "f.txt"});
 
-    char od[] = "/tmp/star_bt_scxout_XXXXXX";
+    char od[] = "/tmp/mutar_bt_scxout_XXXXXX";
     assert(::mkdtemp(od) != nullptr);
 
     // Very large strip count: all entries should simply be skipped, no crash
@@ -740,10 +740,10 @@ static void test_strip_components_extremes() {
 // ─── 16. normalize_member — pathological ./ sequences ────────────────────────
 
 static void test_normalize_member() {
-    // normalize_member is static in star.cpp; test indirectly: create an
+    // normalize_member is static in mutar.cpp; test indirectly: create an
     // archive, then extract specific member by name with leading ./
 
-    char tmpdir[] = "/tmp/star_bt_nm_XXXXXX";
+    char tmpdir[] = "/tmp/mutar_bt_nm_XXXXXX";
     assert(::mkdtemp(tmpdir) != nullptr);
     std::string infile = std::string(tmpdir) + "/hello.txt";
     {
@@ -754,14 +754,14 @@ static void test_normalize_member() {
     run_star({"-cf", archive, "-C", tmpdir, "hello.txt"});
 
     // Extract specifying "./hello.txt" — must find "hello.txt"
-    char od[] = "/tmp/star_bt_nmout_XXXXXX";
+    char od[] = "/tmp/mutar_bt_nmout_XXXXXX";
     assert(::mkdtemp(od) != nullptr);
     int rc = run_star({"-xf", archive, "-C", od, "./hello.txt"});
     CHECK_EQ(rc, 0);
     CHECK_EQ(::access((std::string(od)+"/hello.txt").c_str(), F_OK), 0);
 
     // Also test ./././hello.txt
-    char od2[] = "/tmp/star_bt_nmout2_XXXXXX";
+    char od2[] = "/tmp/mutar_bt_nmout2_XXXXXX";
     assert(::mkdtemp(od2) != nullptr);
     rc = run_star({"-xf", archive, "-C", od2, "././hello.txt"});
     CHECK_EQ(rc, 0);
@@ -775,7 +775,7 @@ static void test_normalize_member() {
 // ─── 17. --null: null-terminated -T file parsing ─────────────────────────────
 
 static void test_null_terminated_files_from() {
-    char tmpdir[] = "/tmp/star_bt_null_XXXXXX";
+    char tmpdir[] = "/tmp/mutar_bt_null_XXXXXX";
     assert(::mkdtemp(tmpdir) != nullptr);
 
     // Create two files
@@ -835,9 +835,9 @@ static void test_null_terminated_files_from() {
 // ─── main ─────────────────────────────────────────────────────────────────────
 
 int main() {
-    std::cout << "=== star boundary/overflow/memory tests ===\n";
+    std::cout << "=== mutar boundary/overflow/memory tests ===\n";
 
-    // Pure unit tests (no star binary needed)
+    // Pure unit tests (no mutar binary needed)
     std::cout << "[1] read_octal\n";        test_read_octal();
     std::cout << "[2] read_base256\n";      test_read_base256();
     std::cout << "[3] write_octal\n";       test_write_octal();
@@ -845,7 +845,7 @@ int main() {
     std::cout << "[5] checksum\n";          test_checksum();
     std::cout << "[6] size_field_boundary\n"; test_size_field_boundary();
 
-    // Integration tests (invoke star binary)
+    // Integration tests (invoke mutar binary)
     std::cout << "[7] pax_long_name\n";          test_pax_long_name();
     std::cout << "[8] sanitize_path traversal\n"; test_sanitize_path_traversal();
     std::cout << "[9] blocking_factor valid.\n";  test_blocking_factor_validation();

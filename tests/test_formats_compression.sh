@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# star/tests/test_formats_compression.sh
+# tests/test_formats_compression.sh
 # Comprehensive format × compression matrix test
 #
 # For every tar format (v7, oldgnu, gnu, ustar, pax) combined with every
@@ -7,23 +7,23 @@
 # lzop, compress, auto-compress), this script:
 #   1. Extracts real sample material from the repo
 #   2. Establishes MD5 ground truth + file/dir counts
-#   3. Creates an archive with star using the given format+compression
+#   3. Creates an archive with mutar using the given format+compression
 #   4. Extracts the archive into a fresh directory
 #   5. Verifies file counts, directory counts, file sizes, and MD5 sums
-#   6. Cross-tests: star creates → system tar extracts  (and vice versa)
+#   6. Cross-tests: mutar creates → system tar extracts  (and vice versa)
 #
 # Usage:
-#   bash test_formats_compression.sh [/path/to/star]
+#   bash test_formats_compression.sh [/path/to/mutar]
 #
-# Set STAR_SRC_DIR to override where sample archives are located.
+# Set MUTAR_SRC_DIR to override where sample archives are located.
 # Set VERBOSE=1 for detailed per-file output.
 set -euo pipefail
 
-STAR="${1:-$(dirname "$0")/../build/star}"
+MUTAR="${1:-$(dirname "$0")/../build/mutar}"
 TAR="${TAR:-tar}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
-SRC_DIR="${STAR_SRC_DIR:-}"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+SRC_DIR="${MUTAR_SRC_DIR:-}"
 if [ -z "$SRC_DIR" ]; then
   for d in "$REPO_ROOT/files/src" "$REPO_ROOT/src" "$REPO_ROOT/files"; do
     [ -f "$d/sidplay-2.0.9.tar.gz" ] && { SRC_DIR="$d"; break; }
@@ -42,21 +42,24 @@ require_cmd() { command -v "$1" &>/dev/null; }
 
 log() { [ "$VERBOSE" = "1" ] && echo "    $*" || true; }
 
-WORKROOT="$(mktemp -d /tmp/star_fmt_cmp.XXXXXX)"
+WORKROOT="$(mktemp -d /tmp/mutar_fmt_cmp.XXXXXX)"
 trap 'rm -rf "$WORKROOT"' EXIT
 
 # ── Ground truth: extract sidplay-2.0.9 (small, known good) ─────────────────
 SAMPLE_ARCHIVE="$SRC_DIR/sidplay-2.0.9.tar.gz"
 GROUND="$WORKROOT/ground"
 
-echo "=== Setting up ground truth from sidplay-2.0.9 ==="
-if [ ! -f "$SAMPLE_ARCHIVE" ]; then
-  echo "FATAL: sample archive not found: $SAMPLE_ARCHIVE"
-  exit 1
-fi
-
+echo "=== Setting up ground truth ==="
 mkdir -p "$GROUND"
-"$TAR" -xzf "$SAMPLE_ARCHIVE" -C "$GROUND"
+if [ ! -f "$SAMPLE_ARCHIVE" ]; then
+  echo "NOTE: sample archive not found ($SAMPLE_ARCHIVE); using synthetic ground truth"
+  mkdir -p "$GROUND/synth/dir a" "$GROUND/synth/sub"
+  printf 'hello world\n' > "$GROUND/synth/file1.txt"
+  printf 'binary' > "$GROUND/synth/dir a/x.bin"
+  ln -s "../file1.txt" "$GROUND/synth/sub/link.txt" 2>/dev/null || true
+else
+  "$TAR" -xzf "$SAMPLE_ARCHIVE" -C "$GROUND"
+fi
 
 # Count files, dirs; generate MD5 manifest
 GT_FILES=$(find "$GROUND" -type f | wc -l)
@@ -109,7 +112,7 @@ run_format_compression_test() {
   [ "$cflag" != "none" ] && create_flags+=("$cflag")
   create_flags+=(-f "$ARCHIVE" -C "$GROUND" .)
 
-  if ! "$STAR" "${create_flags[@]}" 2>"$W/create.err"; then
+  if ! "$MUTAR" "${create_flags[@]}" 2>"$W/create.err"; then
     fail "$label" "create failed (see $W/create.err)"
     return
   fi
@@ -124,7 +127,7 @@ run_format_compression_test() {
   local list_flags=(-t)
   [ "$cflag" != "none" ] && list_flags+=("$cflag")
   list_flags+=(-f "$ARCHIVE")
-  if ! "$STAR" "${list_flags[@]}" >"$W/listing.txt" 2>"$W/list.err"; then
+  if ! "$MUTAR" "${list_flags[@]}" >"$W/listing.txt" 2>"$W/list.err"; then
     fail "$label" "list failed"
     return
   fi
@@ -135,7 +138,7 @@ run_format_compression_test() {
   local extract_flags=(-x)
   [ "$cflag" != "none" ] && extract_flags+=("$cflag")
   extract_flags+=(-f "$ARCHIVE" -C "$W/out")
-  if ! "$STAR" "${extract_flags[@]}" 2>"$W/extract.err"; then
+  if ! "$MUTAR" "${extract_flags[@]}" 2>"$W/extract.err"; then
     fail "$label" "extract failed (see $W/extract.err)"
     return
   fi
@@ -183,13 +186,13 @@ run_auto_compress_test() {
   mkdir -p "$W"
   local ARCHIVE="$W/test${ext}"
 
-  if ! "$STAR" -acf "$ARCHIVE" -C "$GROUND" . 2>"$W/create.err"; then
+  if ! "$MUTAR" -acf "$ARCHIVE" -C "$GROUND" . 2>"$W/create.err"; then
     fail "$label" "auto-compress create failed"
     return
   fi
 
   mkdir -p "$W/out"
-  if ! "$STAR" -axf "$ARCHIVE" -C "$W/out" 2>"$W/extract.err"; then
+  if ! "$MUTAR" -axf "$ARCHIVE" -C "$W/out" 2>"$W/extract.err"; then
     fail "$label" "auto-compress extract failed"
     return
   fi
@@ -227,13 +230,13 @@ run_use_compress_program_test() {
   mkdir -p "$W"
   local ARCHIVE="$W/test${ext}"
 
-  if ! "$STAR" -I "$prog" -cf "$ARCHIVE" -C "$GROUND" . 2>"$W/create.err"; then
+  if ! "$MUTAR" -I "$prog" -cf "$ARCHIVE" -C "$GROUND" . 2>"$W/create.err"; then
     fail "$label" "create failed"
     return
   fi
 
   mkdir -p "$W/out"
-  if ! "$STAR" -I "$prog" -xf "$ARCHIVE" -C "$W/out" 2>"$W/extract.err"; then
+  if ! "$MUTAR" -I "$prog" -xf "$ARCHIVE" -C "$W/out" 2>"$W/extract.err"; then
     fail "$label" "extract failed"
     return
   fi
@@ -256,13 +259,13 @@ run_use_compress_program_test() {
   pass "$label"
 }
 
-# ── Cross-test: star creates → system tar extracts ────────────────────────────
-run_cross_star_to_systtar() {
+# ── Cross-test: mutar creates → system tar extracts ────────────────────────────
+run_cross_mutar_to_systtar() {
   local fmt="$1"
   local cflag="$2"
   local ext="$3"
   local prog="$4"
-  local label="cross:star→tar ${fmt}+${prog}"
+  local label="cross:mutar→tar ${fmt}+${prog}"
 
   # v7 format: system tar may not handle GNU extensions in v7 mode well
   # pax: system tar should handle it
@@ -283,8 +286,8 @@ run_cross_star_to_systtar() {
   local create_flags=(-c -H "$fmt")
   [ "$cflag" != "none" ] && create_flags+=("$cflag")
   create_flags+=(-f "$ARCHIVE" -C "$GROUND" .)
-  if ! "$STAR" "${create_flags[@]}" 2>/dev/null; then
-    skip "$label" "star create failed (format may need GNU extensions)"
+  if ! "$MUTAR" "${create_flags[@]}" 2>/dev/null; then
+    skip "$label" "mutar create failed (format may need GNU extensions)"
     return
   fi
 
@@ -315,12 +318,12 @@ run_cross_star_to_systtar() {
   pass "$label"
 }
 
-# ── Cross-test: system tar creates → star extracts ───────────────────────────
+# ── Cross-test: system tar creates → mutar extracts ───────────────────────────
 run_cross_systtar_to_star() {
   local cflag="$1"
   local ext="$2"
   local prog="$3"
-  local label="cross:tar→star ${prog}"
+  local label="cross:tar→mutar ${prog}"
 
   if [ "$prog" != "none" ] && ! require_cmd "$prog"; then
     skip "$label" "program '$prog' not installed"
@@ -339,12 +342,12 @@ run_cross_systtar_to_star() {
     return
   fi
 
-  # star extracts
+  # mutar extracts
   mkdir -p "$W/out"
   local extract_flags=(-xf "$ARCHIVE" -C "$W/out")
   [ "$cflag" != "none" ] && extract_flags+=("$cflag")
-  if ! "$STAR" "${extract_flags[@]}" 2>/dev/null; then
-    fail "$label" "star extract failed"
+  if ! "$MUTAR" "${extract_flags[@]}" 2>/dev/null; then
+    fail "$label" "mutar extract failed"
     return
   fi
 
@@ -367,7 +370,7 @@ run_cross_systtar_to_star() {
 }
 
 # ── Run all format × compression combinations ─────────────────────────────────
-echo "=== Format × Compression matrix (star create+extract, MD5 verified) ==="
+echo "=== Format × Compression matrix (mutar create+extract, MD5 verified) ==="
 echo ""
 for fmt in "${FORMATS[@]}"; do
   for comp_spec in "${COMPRESSIONS[@]}"; do
@@ -396,18 +399,18 @@ for comp_spec in "${COMPRESSIONS[@]}"; do
 done
 
 echo ""
-echo "=== Cross-compatibility: star → system tar (gnu format + all compressions) ==="
+echo "=== Cross-compatibility: mutar → system tar (gnu format + all compressions) ==="
 for comp_spec in "${COMPRESSIONS[@]}"; do
   IFS=: read -r cflag ext prog <<< "$comp_spec"
-  echo "[cross:star→tar gnu+${prog}]"
-  run_cross_star_to_systtar "gnu" "$cflag" "$ext" "$prog"
+  echo "[cross:mutar→tar gnu+${prog}]"
+  run_cross_mutar_to_systtar "gnu" "$cflag" "$ext" "$prog"
 done
 
 echo ""
-echo "=== Cross-compatibility: system tar → star (all compressions) ==="
+echo "=== Cross-compatibility: system tar → mutar (all compressions) ==="
 for comp_spec in "${COMPRESSIONS[@]}"; do
   IFS=: read -r cflag ext prog <<< "$comp_spec"
-  echo "[cross:tar→star ${prog}]"
+  echo "[cross:tar→mutar ${prog}]"
   run_cross_systtar_to_star "$cflag" "$ext" "$prog"
 done
 
@@ -441,15 +444,15 @@ for archive in "${REPO_ARCHIVES[@]}"; do
   find "$W/src" -type f | sort | xargs md5sum 2>/dev/null | \
     sed "s|$W/src/||g" | sort > "$W/orig_md5.txt" || true
 
-  # Repack with star into a separate location (not inside src)
-  if ! timeout 30 "$STAR" -czf "$W/repack.tar.gz" -C "$W/src" . 2>/dev/null; then
+  # Repack with mutar into a separate location (not inside src)
+  if ! timeout 30 "$MUTAR" -czf "$W/repack.tar.gz" -C "$W/src" . 2>/dev/null; then
     fail "repo:$base" "star repack failed"
     continue
   fi
 
-  # Extract with star into a separate output dir
-  if ! timeout 30 "$STAR" -xzf "$W/repack.tar.gz" -C "$W/out" 2>/dev/null; then
-    fail "repo:$base" "star extract of repack failed"
+  # Extract with mutar into a separate output dir
+  if ! timeout 30 "$MUTAR" -xzf "$W/repack.tar.gz" -C "$W/out" 2>/dev/null; then
+    fail "repo:$base" "mutar extract of repack failed"
     continue
   fi
 

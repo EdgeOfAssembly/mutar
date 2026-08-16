@@ -1,13 +1,15 @@
-# star — Modern C++23 Super-Tar
+# µtar (`mutar`) — Modern C++23 GNU-tar-compatible archiver
 
-`star` is a ground-up C++23 reimplementation of GNU tar.
+**µtar** (binary: **`mutar`**) is a ground-up C++23 reimplementation of GNU tar.
 
-It is **archive-compatible** with GNU tar 1.35 for the common formats
-(v7, oldgnu, gnu, ustar, pax/posix) and supports the full command-line
-interface documented in `tar(1)`. Run `./star --help` to see all ~100 options.
+It is **not** Jörg Schilling’s `star` (Schily tools).
 
-> **Current as of PR #170.** See `COMPATIBILITY_PROGRESS.md` for a full
-> option-by-option audit and `ARCHITECTURE.md` for design details.
+**Compatibility goal: ~99% with GNU tar 1.35** for common formats
+(v7, oldgnu, gnu, ustar, pax/posix) and the command-line interface in `tar(1)`.
+**SELinux is not supported** (no test hardware). Run `./mutar --help` for options.
+
+> See `COMPATIBILITY_PROGRESS.md` for an option-by-option audit and
+> `ARCHITECTURE.md` for design details. Campaign plan: `GOAL.md`.
 
 ---
 
@@ -15,7 +17,7 @@ interface documented in `tar(1)`. Run `./star --help` to see all ~100 options.
 
 ```bash
 # Build (debug — full GDB symbols by default)
-cd star && mkdir -p build && cd build
+cd mutar && mkdir -p build && cd build
 cmake .. -DCMAKE_BUILD_TYPE=Debug
 make -j$(nproc)
 
@@ -29,7 +31,7 @@ make -j$(nproc)
 ## Usage
 
 ```
-star [OPTION...] [FILE...]
+mutar [OPTION...] [FILE...]
 ```
 
 ### Main Operations
@@ -74,37 +76,37 @@ star [OPTION...] [FILE...]
 
 ```bash
 # Create a gzip-compressed archive
-star -czf project.tar.gz src/
+mutar -czf project.tar.gz src/
 
 # Extract with verbose output
-star -xvf project.tar.gz
+mutar -xvf project.tar.gz
 
 # Extract to a specific directory
-star -xf archive.tar -C /tmp/dest
+mutar -xf archive.tar -C /tmp/dest
 
 # List contents of an xz-compressed archive
-star -tJf tar-1.35.tar.xz
+mutar -tJf tar-1.35.tar.xz
 
 # Create POSIX/PAX format (supports filenames > 100 chars, nanosecond timestamps)
-star --posix -cf archive.tar very-long-path/
+mutar --posix -cf archive.tar very-long-path/
 
 # Extract only specific files
-star -xf archive.tar file1.txt dir/file2.txt
+mutar -xf archive.tar file1.txt dir/file2.txt
 
 # Create with exclusions
-star -czf backup.tar.gz . --exclude='*.o' --exclude='.git'
+mutar -czf backup.tar.gz . --exclude='*.o' --exclude='.git'
 
 # Strip leading path component on extract
-star -xf archive.tar --strip-components=1
+mutar -xf archive.tar --strip-components=1
 
 # Post-create read-back verification
-star -czf backup.tar.gz src/ --verify
+mutar -czf backup.tar.gz src/ --verify
 
 # Interactive extraction with confirmation prompts
-star -xf archive.tar --interactive
+mutar -xf archive.tar --interactive
 
 # Show all available options
-star --help
+mutar --help
 ```
 
 ---
@@ -277,16 +279,16 @@ Four test suites are provided:
 
 ```bash
 # Core functionality — 41 tests, 0 failures
-bash tests/run_tests.sh build/star
+bash tests/run_tests.sh build/mutar
 
 # Format + compression round-trips — 59 pass, 27 skip (missing lzip/lzop/compress)
-bash tests/test_formats_compression.sh build/star
+bash tests/test_formats_compression.sh build/mutar
 
 # Sparse file handling — 20 pass, 3 skip
-bash tests/test_sparse.sh build/star
+bash tests/test_sparse.sh build/mutar
 
 # New PR #170 options — 20 pass, 0 failures
-bash tests/test_new_options.sh build/star
+bash tests/test_new_options.sh build/mutar
 ```
 
 ### `tests/run_tests.sh` — 41 tests
@@ -333,22 +335,22 @@ bash tests/test_new_options.sh build/star
 | T40 | Sparse file write + extract round-trip |
 | T41 | Hard link deduplication (nlink>1) |
 
-Set `STAR_SRC_DIR=/path/to/archives` to point tests at a different `src/` directory.
-Run against any tar-compatible tool via `TAR=mytool bash tests/run_tests.sh`.
+Set `MUTAR_SRC_DIR=/path/to/archives` to point tests at a different `src/` directory.
+Run against any tar-compatible tool via `TAR=mytool bash tests/run_tests.sh  # optional system tar path`.
 
 ---
 
 ## Source Layout
 
 ```
-star/
+mutar/
 ├── CMakeLists.txt                    # CMake build (Debug/Release)
 ├── README.md                         # This file
 ├── ARCHITECTURE.md                   # Design notes
 ├── COMPATIBILITY_PROGRESS.md         # Option-by-option audit & PR changelog
 ├── src/
-│   ├── star.hpp                      # Block layout, types, Config, Entry, helpers
-│   └── star.cpp                      # Full implementation (~3000 lines)
+│   ├── mutar.hpp                      # Block layout, types, Config, Entry, helpers
+│   └── mutar.cpp                      # Full implementation (~4000 lines)
 └── tests/
     ├── run_tests.sh                  # 41-test core harness
     ├── test_formats_compression.sh   # 86-test format/compression suite

@@ -1,4 +1,6 @@
-# star — Compatibility Progress & PR #170 Changelog
+# mutar (µtar) — Compatibility Progress & PR #170 Changelog
+
+**Compatibility goal: ~99% GNU tar 1.35. SELinux is unsupported.**
 
 This document is the proof-of-work record for PR #170. It captures the
 complete option-by-option audit against `tar(1)` / GNU tar 1.35, describes
@@ -24,7 +26,7 @@ Compression tools available in the CI / development environment:
 
 ---
 
-## Audit: tar.1 vs star.cpp
+## Audit: tar.1 vs mutar.cpp
 
 Legend:
 - ✅ **Implemented** — option is parsed and has full behavioural effect
@@ -129,10 +131,10 @@ Legend:
 | `--atime-preserve[=METHOD]` | ✅ | |
 | `--utc` | ✅ | |
 | `--full-time` | 🔧 | Nanosecond timestamps now shown in `--list` |
-| `--xattrs` / `--no-xattrs` | ⚠️ | Build-time detection: present only when `STAR_HAVE_XATTR` (sys/xattr.h + listxattr). Option accepted; xattr data not yet stored in archive. |
+| `--xattrs` / `--no-xattrs` | ⚠️ | Build-time detection: present only when `MUTAR_HAVE_XATTR` (sys/xattr.h + listxattr). Option accepted; xattr data not yet stored in archive. |
 | `--xattrs-include=MASK` / `--xattrs-exclude=MASK` | ⚠️ | Build-time detection: same guard. Patterns stored; no-op until xattr archive I/O is wired. |
-| `--acls` / `--no-acls` | ⚠️ | Build-time detection: present only when `STAR_HAVE_ACL` (sys/acl.h + libacl). Compiled out if libacl not found; unknown-option error if invoked without support. |
-| `--selinux` / `--no-selinux` | ⚠️ | Build-time detection: present only when `STAR_HAVE_SELINUX` (selinux/selinux.h + libselinux). Compiled out if libselinux not found. |
+| `--acls` / `--no-acls` | ⚠️ | Build-time detection: present only when `MUTAR_HAVE_ACL` (sys/acl.h + libacl). Compiled out if libacl not found; unknown-option error if invoked without support. |
+| `--selinux` / `--no-selinux` | ❌ Unsupported | Project policy: no SELinux test hardware. Options accepted as no-ops with warning. |
 
 ### Extraction Behaviour
 
@@ -356,15 +358,15 @@ All results measured in the CI environment described in the Environment section.
 ```
 ctest --output-on-failure
 Test project …/star/build
-    Start 1: star_tests          Passed
-    Start 2: star_shell_tests    Passed
+    Start 1: mutar_tests          Passed
+    Start 2: mutar_shell_tests    Passed
 2/2 tests passed
 ```
 
 ### `tests/run_tests.sh` (core harness)
 
 ```
-bash tests/run_tests.sh build/star
+bash tests/run_tests.sh build/mutar
 …
 Tests passed: 41 / 41
 Tests failed: 0
@@ -373,7 +375,7 @@ Tests failed: 0
 ### `tests/test_formats_compression.sh`
 
 ```
-bash tests/test_formats_compression.sh build/star
+bash tests/test_formats_compression.sh build/mutar
 …
 Passed: 59   Skipped: 27   Failed: 0
 ```
@@ -384,7 +386,7 @@ present in the CI environment. All skips are expected and benign.
 ### `tests/test_sparse.sh`
 
 ```
-bash tests/test_sparse.sh build/star
+bash tests/test_sparse.sh build/mutar
 …
 Passed: 20   Skipped: 3   Failed: 0
 ```
@@ -395,7 +397,7 @@ The 3 skipped tests require a filesystem that supports sparse files via
 ### `tests/test_new_options.sh` (PR #170)
 
 ```
-bash tests/test_new_options.sh build/star
+bash tests/test_new_options.sh build/mutar
 …
 Passed: 20   Failed: 0
 ```
@@ -403,7 +405,7 @@ Passed: 20   Failed: 0
 ### `tests/test_pr172_features.sh` (PR #172)
 
 ```
-bash tests/test_pr172_features.sh build/star
+bash tests/test_pr172_features.sh build/mutar
 …
 Results: 10 passed, 0 failed, 0 skipped
 ```
@@ -434,7 +436,7 @@ keys are supported.
 ### 3. Incremental snapshot (`-g FILE --level=N`)
 
 On level-0 (or when no snapshot exists): archives all files, then writes
-`STAR_SNAPSHOT_V1\nname\tmtime\n...` via `mkstemp` + `rename` (atomic).
+`MUTAR_SNAPSHOT_V1\nname\tmtime\n...` via `mkstemp` + `rename` (atomic).
 
 On level≥1: reads the snapshot, and the `add_file` lambda skips regular
 files whose mtime ≤ snapshot mtime. After archiving, the snapshot is updated
@@ -466,7 +468,7 @@ Append/update operations on remote archives are not supported.
 
 ### 6. `--warning=KEYWORD` wiring
 
-`star_warn(cfg, category, msg)` checks `cfg.warn_none`, `cfg.warn_all`,
+`mutar_warn(cfg, category, msg)` checks `cfg.warn_none`, `cfg.warn_all`,
 `warnings_disabled`, and `warnings_enabled` before emitting to stderr. Wired
 at: `failed-read` (lstat failures in walk_dir), `newer` (--newer filter skips),
 `missing-links` (--check-links), `xdev` (--one-file-system skips).
@@ -503,7 +505,7 @@ compatibility.
 | `-M` (multi-volume) | `multi_volume` | 🔧 PR #172: volume naming + prompts work; ArchiveWriter stream-swap for mid-file continuation is TODO |
 | `--rsh-command` / `--rmt-command` | `rsh_command`, `rmt_command` | 🔧 PR #172: rmt bridge via rsh fork+pipe; O/R/W/C protocol implemented. Limitation: lseek over rmt not implemented |
 | PAX sparse write format | `fmt_` | ✅ PR #172: when `--format=pax`, GNU.sparse.* PAX keywords emitted; GNU.sparse.map parsed on read |
-| `--warning=KEYWORD` | `warnings_enabled/disabled` | ✅ PR #172: `star_warn()` helper implemented and wired at key emission sites |
+| `--warning=KEYWORD` | `warnings_enabled/disabled` | ✅ PR #172: `mutar_warn()` helper implemented and wired at key emission sites |
 | `--overwrite-dir` / `--no-overwrite-dir` | `overwrite_dir`, `no_overwrite_dir` | ✅ PR #172: DIRTYPE case in op_extract checks existing path and skips fixup when --no-overwrite-dir |
 
 ---
@@ -512,16 +514,16 @@ compatibility.
 
 ### How tests were run
 
-All test suites are plain Bash scripts that take the path to the `star`
+All test suites are plain Bash scripts that take the path to the `mutar`
 binary as their first argument. They do not require `root`; they use
 `mktemp -d` for isolation and clean up on exit.
 
 ```bash
 # From the star/ directory after building:
-bash tests/run_tests.sh         build/star
-bash tests/test_formats_compression.sh  build/star
-bash tests/test_sparse.sh       build/star
-bash tests/test_new_options.sh  build/star
+bash tests/run_tests.sh         build/mutar
+bash tests/test_formats_compression.sh  build/mutar
+bash tests/test_sparse.sh       build/mutar
+bash tests/test_new_options.sh  build/mutar
 ```
 
 ### What the tests verify

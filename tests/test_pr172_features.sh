@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# star/tests/test_pr172_features.sh — Integration tests for PR #172 features
+# tests/test_pr172_features.sh — Integration tests for PR #172 features
 #
 # Tests:
 #   T-OWN-01      owner-map: uname remapped in archive
@@ -13,10 +13,10 @@
 #   T-MVOL-01     -M --tape-length accepted, archive created
 #   T-RMT-01      --rsh-command / --rmt-command accepted; remote error appropriate
 #
-# Usage: ./test_pr172_features.sh [/path/to/star]
+# Usage: ./test_pr172_features.sh [/path/to/mutar]
 set -uo pipefail
 
-STAR="${1:-$(dirname "$0")/../build/star}"
+MUTAR="${1:-$(dirname "$0")/../build/mutar}"
 TMPBASE="$(mktemp -d)"
 trap 'rm -rf "$TMPBASE"' EXIT
 
@@ -36,10 +36,10 @@ echo "[T-OWN-01]"
     CURRENT_USER="$(id -un)"
     printf "%s testuser999\n" "$CURRENT_USER" > "$D/owner.map"
 
-    "$STAR" -c -f "$D/archive.tar" --owner-map="$D/owner.map" \
+    "$MUTAR" -c -f "$D/archive.tar" --owner-map="$D/owner.map" \
         -C "$D" src/ 2>/dev/null || true
 
-    LIST="$("$STAR" -tvf "$D/archive.tar" 2>/dev/null || true)"
+    LIST="$("$MUTAR" -tvf "$D/archive.tar" 2>/dev/null || true)"
     if echo "$LIST" | grep -q "testuser999"; then
         pass "T-OWN-01: uname remapped by --owner-map"
     else
@@ -57,7 +57,7 @@ echo "[T-INCR-01]"
     SNAP="$D/snapshot.snap"
 
     # Level-0: archive all
-    "$STAR" -c -f "$D/level0.tar" -g "$SNAP" --level=0 \
+    "$MUTAR" -c -f "$D/level0.tar" -g "$SNAP" --level=0 \
         -C "$D" src/ 2>/dev/null || true
 
     # Ensure level-0 snapshot was created
@@ -69,10 +69,10 @@ echo "[T-INCR-01]"
         echo "modified content" > "$D/src/changed.txt"
 
         # Level-1: archive only modified files
-        "$STAR" -c -f "$D/level1.tar" -g "$SNAP" --level=1 \
+        "$MUTAR" -c -f "$D/level1.tar" -g "$SNAP" --level=1 \
             -C "$D" src/ 2>/dev/null || true
 
-        LIST1="$("$STAR" -tf "$D/level1.tar" 2>/dev/null || true)"
+        LIST1="$("$MUTAR" -tf "$D/level1.tar" 2>/dev/null || true)"
         if echo "$LIST1" | grep -q "changed.txt"; then
             if echo "$LIST1" | grep -q "unchanged.txt"; then
                 fail "T-INCR-01" "unchanged.txt incorrectly in level-1 archive"
@@ -94,7 +94,7 @@ echo "[T-INCR-02]"
     echo "world" > "$D/src/b.txt"
     SNAP="$D/snap.snap"
 
-    "$STAR" -c -f "$D/arch.tar" -g "$SNAP" --level=0 \
+    "$MUTAR" -c -f "$D/arch.tar" -g "$SNAP" --level=0 \
         -C "$D" src/ 2>/dev/null || true
 
     if [ ! -f "$SNAP" ]; then
@@ -102,7 +102,7 @@ echo "[T-INCR-02]"
     else
         LINES="$(wc -l < "$SNAP")"
         HEAD="$(head -1 "$SNAP")"
-        if [ "$HEAD" = "STAR_SNAPSHOT_V1" ] && [ "$LINES" -ge 2 ]; then
+        if [ "$HEAD" = "MUTAR_SNAPSHOT_V1" ] && [ "$LINES" -ge 2 ]; then
             pass "T-INCR-02: snapshot file created with correct format ($LINES lines)"
         else
             fail "T-INCR-02" "snapshot malformed: head='$HEAD' lines=$LINES"
@@ -118,10 +118,10 @@ echo "[T-WARN-01]"
     echo "x" > "$D/src/f.txt"
 
     # Attempt to archive a non-existent file to trigger a warning
-    WARN_OUT="$("$STAR" -c -f "$D/arch.tar" --warning=none \
+    WARN_OUT="$("$MUTAR" -c -f "$D/arch.tar" --warning=none \
         -C "$D/src" f.txt nonexistent_file_xyz.txt 2>&1 || true)"
 
-    if echo "$WARN_OUT" | grep -qi "^star: warning:"; then
+    if echo "$WARN_OUT" | grep -qi "^mutar: warning:"; then
         fail "T-WARN-01" "warning emitted despite --warning=none: $WARN_OUT"
     else
         pass "T-WARN-01: --warning=none suppresses warnings"
@@ -137,7 +137,7 @@ echo "[T-WARN-02]"
     ln "$D/src/original.txt" "$D/src/link2.txt"
 
     # Archive only original.txt with --check-links so the second link is "missing"
-    WARN_OUT="$("$STAR" -c -f "$D/arch.tar" --check-links \
+    WARN_OUT="$("$MUTAR" -c -f "$D/arch.tar" --check-links \
         --warning=missing-links -C "$D/src" original.txt 2>&1 || true)"
 
     # Accept either: warning emitted, or no warning (implementation detail)
@@ -162,7 +162,7 @@ echo "[T-ODIR-01]"
     touch -t 200001010000.00 "$SRC/testdir" 2>/dev/null || true
 
     # Create archive (dir entry has year-2000 mtime)
-    "$STAR" -c -f "$D/arch.tar" --format=ustar -C "$D" src/ 2>/dev/null || true
+    "$MUTAR" -c -f "$D/arch.tar" --format=ustar -C "$D" src/ 2>/dev/null || true
 
     # Pre-create the extract directory structure BEFORE extraction
     # so that the dirs already exist when star tries to extract them
@@ -170,7 +170,7 @@ echo "[T-ODIR-01]"
 
     # Extract with --no-overwrite-dir; archived year-2000 mtime must NOT be applied
     # because the directories already exist
-    "$STAR" -x -f "$D/arch.tar" --no-overwrite-dir -C "$EXT" 2>/dev/null || true
+    "$MUTAR" -x -f "$D/arch.tar" --no-overwrite-dir -C "$EXT" 2>/dev/null || true
 
     if [ -d "$EXT/src/testdir" ]; then
         FINAL_MTIME="$(stat -c %Y "$EXT/src/testdir" 2>/dev/null || \
@@ -199,11 +199,11 @@ echo "[T-ODIR-02]"
     touch -t 200001010000.00 "$SRC/testdir" 2>/dev/null || true
 
     # Create archive (the dir entry gets mtime from year 2000)
-    "$STAR" -c -f "$D/arch.tar" --format=ustar -C "$D" src/ 2>/dev/null || true
+    "$MUTAR" -c -f "$D/arch.tar" --format=ustar -C "$D" src/ 2>/dev/null || true
 
     # Extract fresh (no pre-existing dir)
     mkdir -p "$EXT"
-    "$STAR" -x -f "$D/arch.tar" --overwrite-dir --same-permissions -C "$EXT" 2>/dev/null || true
+    "$MUTAR" -x -f "$D/arch.tar" --overwrite-dir --same-permissions -C "$EXT" 2>/dev/null || true
 
     if [ -d "$EXT/src/testdir" ]; then
         pass "T-ODIR-02: --overwrite-dir accepted; directory extracted"
@@ -228,7 +228,7 @@ echo "[T-PAX-SPARSE-01]"
     ORIG_SZ="$(wc -c < "$SPARSE_FILE")"
 
     # Archive with PAX + sparse
-    "$STAR" -c -S --format=pax -f "$D/sparse_pax.tar" \
+    "$MUTAR" -c -S --format=pax -f "$D/sparse_pax.tar" \
         -C "$D" src/ 2>/dev/null || true
 
     if [ ! -f "$D/sparse_pax.tar" ]; then
@@ -236,7 +236,7 @@ echo "[T-PAX-SPARSE-01]"
     else
         EXT="$D/extract"
         mkdir -p "$EXT"
-        "$STAR" -x -f "$D/sparse_pax.tar" -C "$EXT" 2>/dev/null || true
+        "$MUTAR" -x -f "$D/sparse_pax.tar" -C "$EXT" 2>/dev/null || true
 
         EXTRACTED="$EXT/src/sparse.bin"
         if [ -f "$EXTRACTED" ]; then
@@ -260,7 +260,7 @@ echo "[T-MVOL-01]"
     echo "data" > "$D/src/file.txt"
 
     # Feed newline to any interactive prompts via stdin
-    RESULT="$(echo "" | "$STAR" -c -M --tape-length=1000 -f "$D/archive.tar" \
+    RESULT="$(echo "" | "$MUTAR" -c -M --tape-length=1000 -f "$D/archive.tar" \
         -C "$D" src/ 2>&1 || true)"
 
     if [ -f "$D/archive.tar" ]; then
@@ -278,7 +278,7 @@ echo "[T-RMT-01]"
     echo "data" > "$D/src/file.txt"
 
     # A remote-looking archive path; connection will fail but error must be appropriate
-    ERR="$("$STAR" -c --rsh-command=rsh --rmt-command=rmt \
+    ERR="$("$MUTAR" -c --rsh-command=rsh --rmt-command=rmt \
         -f "testuser@nonexistent-host-xyz-abc-test:/tmp/test.tar" \
         -C "$D" src/ 2>&1 || true)"
 

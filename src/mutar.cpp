@@ -1,4 +1,4 @@
-// star.cpp — Modern C++23 Super-Tar (star) — full implementation
+// mutar.cpp — µtar (mutar) C++23 GNU-tar-compatible archiver — implementation
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
 // Implements: create (-c), extract (-x), list (-t), append (-r),
@@ -9,7 +9,7 @@
 //
 // Source reference: tar-1.35 src/, lib/, rmt/, scripts/
 
-#include "star.hpp"
+#include "mutar.hpp"
 
 #include <algorithm>
 #include <cerrno>
@@ -47,9 +47,9 @@
 #include <utility>
 
 // ── Compatibility: print helpers for GCC < 14 ────────────────────────────────
-// GCC 13 has <format> but not <print>. We define helpers in star_compat to
+// GCC 13 has <format> but not <print>. We define helpers in mutar_compat to
 // avoid injecting into namespace std (which is undefined behavior).
-namespace star_compat {
+namespace mutar_compat {
 template<typename... Args>
 void print(std::FILE* f, std::format_string<Args...> fmt, Args&&... args) {
     std::fputs(std::format(fmt, std::forward<Args>(args)...).c_str(), f);
@@ -58,14 +58,14 @@ template<typename... Args>
 void print(std::format_string<Args...> fmt, Args&&... args) {
     std::fputs(std::format(fmt, std::forward<Args>(args)...).c_str(), stdout);
 }
-} // namespace star_compat
+} // namespace mutar_compat
 
-// Bring into star namespace via using so all existing call-sites work unchanged.
-namespace star {
-using star_compat::print;
+// Bring into mutar namespace via using so all existing call-sites work unchanged.
+namespace mutar {
+using mutar_compat::print;
 }
 
-namespace star {
+namespace mutar {
 
 // Index file for --index-file (verbose output redirection)
 static FILE* g_index_fp = nullptr;
@@ -389,7 +389,7 @@ public:
         // cause record_size_ to be 0 or wrap, leading to UB in buf_.resize().
         if (blocking < 1) {
             std::fprintf(stderr,
-                         "star: invalid blocking factor %d (must be >= 1)\n",
+                         "mutar: invalid blocking factor %d (must be >= 1)\n",
                          blocking);
             std::exit(EXIT_FAILURE);
         }
@@ -426,7 +426,7 @@ public:
         if (pos_ < record_size_)
             std::memset(buf_.data() + pos_, 0, record_size_ - pos_);
         if (!s.write_buf(buf_.data(), record_size_)) {
-            std::perror("star: write");
+            std::perror("mutar: write");
             std::exit(EXIT_FAILURE);
         }
         pos_ = 0;
@@ -630,7 +630,7 @@ static std::map<std::string,std::string> load_id_map(const std::string& path) {
     if (path.empty()) return m;
     std::ifstream f(path);
     if (!f) {
-        print(stderr, "star: {}: cannot open map file: {}\n",
+        print(stderr, "mutar: {}: cannot open map file: {}\n",
                      path, std::strerror(errno));
         return m;
     }
@@ -694,14 +694,14 @@ static void apply_owner_map(Entry& e,
 
 // Emit a warning message, respecting --warning=none/all/KEYWORD/no-KEYWORD.
 // category: short string like "failed-read", "newer", "missing-links", "xdev"
-static void star_warn(const Config& cfg, std::string_view category, std::string_view msg) {
+static void mutar_warn(const Config& cfg, std::string_view category, std::string_view msg) {
     if (cfg.warn_none) return;
-    if (cfg.warn_all) { std::fprintf(stderr, "star: warning: %.*s\n",
+    if (cfg.warn_all) { std::fprintf(stderr, "mutar: warning: %.*s\n",
                                      static_cast<int>(msg.size()), msg.data()); return; }
     std::string cat(category);
     if (cfg.warnings_disabled.count(cat)) return;
     if (cfg.warnings_enabled.empty() || cfg.warnings_enabled.count(cat))
-        std::fprintf(stderr, "star: warning: %.*s\n",
+        std::fprintf(stderr, "mutar: warning: %.*s\n",
                      static_cast<int>(msg.size()), msg.data());
 }
 
@@ -772,14 +772,14 @@ static int open_remote_stream(const std::string& archive_file,
 
     int data_pipe[2];
     if (::pipe(data_pipe) < 0) {
-        print(stderr, "star: pipe: {}\n", std::strerror(errno));
+        print(stderr, "mutar: pipe: {}\n", std::strerror(errno));
         return -1;
     }
 
     pid_t bridge_pid = ::fork();
     if (bridge_pid < 0) {
         ::close(data_pipe[0]); ::close(data_pipe[1]);
-        print(stderr, "star: fork: {}\n", std::strerror(errno));
+        print(stderr, "mutar: fork: {}\n", std::strerror(errno));
         return -1;
     }
 
@@ -841,14 +841,14 @@ static int open_remote_stream(const std::string& archive_file,
         int open_mode = for_write ? (O_WRONLY | O_CREAT | O_TRUNC) : O_RDONLY;
         std::string open_cmd = std::format("O {}\n{}\n", remote_path, open_mode);
         if (!rmt_write_cmd(open_cmd)) {
-            std::fprintf(stderr, "star: rmt: failed to send open command\n");
+            std::fprintf(stderr, "mutar: rmt: failed to send open command\n");
             ::close(rmt_in[1]); ::close(rmt_out[0]);
             ::close(data_pipe[0]); ::close(data_pipe[1]);
             ::_exit(1);
         }
         std::string resp = rmt_read_response();
         if (resp.empty() || resp[0] != 'A') {
-            std::fprintf(stderr, "star: rmt: remote open failed: %s", resp.c_str());
+            std::fprintf(stderr, "mutar: rmt: remote open failed: %s", resp.c_str());
             ::close(rmt_in[1]); ::close(rmt_out[0]);
             ::close(data_pipe[0]); ::close(data_pipe[1]);
             ::_exit(1);
@@ -968,7 +968,7 @@ public:
             }
 
             if (!valid_checksum(blk)) {
-                print(stderr, "star: invalid block checksum at block {}\n",
+                print(stderr, "mutar: invalid block checksum at block {}\n",
                            buf_.block_no());
                 return {{}, false, false};
             }
@@ -1223,7 +1223,7 @@ public:
         int rc = cfg.dereference ? ::stat(fspath.c_str(), &st)
                                  : ::lstat(fspath.c_str(), &st);
         if (rc < 0) {
-            print(stderr, "star: {}: {}\n", fspath, std::strerror(errno));
+            print(stderr, "mutar: {}: {}\n", fspath, std::strerror(errno));
             return false;
         }
 
@@ -1285,7 +1285,7 @@ public:
         } else if (S_ISLNK(st.st_mode)) {
             char buf[PATH_MAX + 1]{};
             ssize_t n = ::readlink(fspath.c_str(), buf, PATH_MAX);
-            if (n < 0) { print(stderr, "star: readlink {}: {}\n", fspath, std::strerror(errno)); return false; }
+            if (n < 0) { print(stderr, "mutar: readlink {}: {}\n", fspath, std::strerror(errno)); return false; }
             buf[n] = '\0';
             e.typeflag = SYMTYPE;
             e.linkname = buf;
@@ -1417,7 +1417,7 @@ private:
 
         int fd = ::open(fspath.c_str(), O_RDONLY);
         if (fd < 0) {
-            print(stderr, "star: {}: {}\n", fspath, std::strerror(errno));
+            print(stderr, "mutar: {}: {}\n", fspath, std::strerror(errno));
             write_data_zeros(e.size);
             return false;
         }
@@ -1459,7 +1459,7 @@ private:
     bool write_sparse(Entry& e, const std::string& fspath,
                       const Config& cfg, const struct stat& st) {
         int fd = ::open(fspath.c_str(), O_RDONLY);
-        if (fd < 0) { print(stderr, "star: {}: {}\n", fspath, std::strerror(errno)); return false; }
+        if (fd < 0) { print(stderr, "mutar: {}: {}\n", fspath, std::strerror(errno)); return false; }
 
         auto segs = detect_sparse_segments(fd, e.size, cfg.hole_detection);
 
@@ -1943,7 +1943,7 @@ static void walk_dir(const std::string& base_dir, const std::string& relpath,
 
     struct stat st{};
     if (::lstat(full.c_str(), &st) < 0) {
-        star_warn(cfg, "failed-read", std::format("{}: {}", full, std::strerror(errno)));
+        mutar_warn(cfg, "failed-read", std::format("{}: {}", full, std::strerror(errno)));
         return;
     }
 
@@ -1959,7 +1959,7 @@ static void walk_dir(const std::string& base_dir, const std::string& relpath,
 
     if (is_excluded(cfg, archname)) {
         if (cfg.show_omitted_dirs && S_ISDIR(st.st_mode))
-            print(stderr, "star: {}/\n", archname);
+            print(stderr, "mutar: {}/\n", archname);
         return;
     }
 
@@ -1970,7 +1970,7 @@ static void walk_dir(const std::string& base_dir, const std::string& relpath,
         dev_t this_dev = (same_dev == static_cast<dev_t>(-1)) ? st.st_dev : same_dev;
         // Walk contents
         DIR* d = ::opendir(full.c_str());
-        if (!d) { print(stderr, "star: opendir {}: {}\n", full, std::strerror(errno)); return; }
+        if (!d) { print(stderr, "mutar: opendir {}: {}\n", full, std::strerror(errno)); return; }
         std::vector<std::string> entries;
         while (struct dirent* de = ::readdir(d)) {
             std::string_view dname(de->d_name);
@@ -2063,7 +2063,7 @@ static void walk_dir(const std::string& base_dir, const std::string& relpath,
                 struct stat cst{};
                 if (::lstat(child.c_str(), &cst) == 0 && cst.st_dev != this_dev) {
                     if (cfg.verbose)
-                        star_warn(cfg, "xdev",
+                        mutar_warn(cfg, "xdev",
                                   std::format("{}: file is on a different filesystem; not dumped", child));
                     continue;
                 }
@@ -2113,21 +2113,21 @@ static std::string format_time(std::int64_t t, bool utc = false) {
 static void do_checkpoint(const Config& cfg, std::int64_t num) {
     if (cfg.checkpoint_action.empty()) {
         // Default behavior: print a standard checkpoint message
-        print(stderr, "star: checkpoint {}\n", num);
+        print(stderr, "mutar: checkpoint {}\n", num);
     } else if (cfg.checkpoint_action == "dot" || cfg.checkpoint_action == ".") {
         std::fputc('.', stderr);
     } else if (cfg.checkpoint_action.starts_with("echo")) {
         std::string msg = cfg.checkpoint_action.size() > 4
             ? cfg.checkpoint_action.substr(5) // skip "echo "
             : std::format("checkpoint {}", num);
-        print(stderr, "star: {}\n", msg);
+        print(stderr, "mutar: {}\n", msg);
     } else if (cfg.checkpoint_action.starts_with("ttyout=")) {
         std::string msg = cfg.checkpoint_action.substr(7);
         FILE* tty = std::fopen("/dev/tty", "w");
         if (tty) { std::fputs(msg.c_str(), tty); std::fclose(tty); }
-        else print(stderr, "star: checkpoint-action: cannot open /dev/tty\n");
+        else print(stderr, "mutar: checkpoint-action: cannot open /dev/tty\n");
     } else {
-        print(stderr, "star: checkpoint {}\n", num);
+        print(stderr, "mutar: checkpoint {}\n", num);
     }
 }
 
@@ -2171,7 +2171,7 @@ static void print_verbose(const Entry& e, const Config& cfg,
 static int op_list(const Config& cfg) {
     auto res = ArchiveStream::open_read(cfg);
     if (!res) {
-        print(stderr, "star: {}\n", res.error().message);
+        print(stderr, "mutar: {}\n", res.error().message);
         return EXIT_FAILURE;
     }
     ArchiveStream& s = *res;
@@ -2180,7 +2180,7 @@ static int op_list(const Config& cfg) {
     if (!cfg.index_file.empty()) {
         g_index_fp = std::fopen(cfg.index_file.c_str(), "w");
         if (!g_index_fp)
-            print(stderr, "star: {}: cannot open index file\n", cfg.index_file);
+            print(stderr, "mutar: {}: cannot open index file\n", cfg.index_file);
     }
 
     // Normalize user-supplied member names so "./file.txt" matches stored "file.txt"
@@ -2212,7 +2212,7 @@ static int op_list(const Config& cfg) {
         if (!want.empty() && !want.contains(e.name) && !want.contains(display_name)) {
             if (cfg.show_omitted_dirs &&
                 (e.typeflag == DIRTYPE || (!e.name.empty() && e.name.back() == '/')))
-                print(stderr, "star: {}\n", e.name);
+                print(stderr, "mutar: {}\n", e.name);
             reader.skip_entry(e);
             continue;
         }
@@ -2246,7 +2246,7 @@ static int op_list(const Config& cfg) {
 static int op_create(const Config& cfg) {
     auto res = ArchiveStream::open_write(cfg);
     if (!res) {
-        print(stderr, "star: {}\n", res.error().message);
+        print(stderr, "mutar: {}\n", res.error().message);
         return EXIT_FAILURE;
     }
     ArchiveStream& s = *res;
@@ -2254,7 +2254,7 @@ static int op_create(const Config& cfg) {
     if (!cfg.index_file.empty()) {
         g_index_fp = std::fopen(cfg.index_file.c_str(), "w");
         if (!g_index_fp)
-            print(stderr, "star: {}: cannot open index file\n", cfg.index_file);
+            print(stderr, "mutar: {}: cannot open index file\n", cfg.index_file);
     }
 
     // --level=0 with --listed-incremental: truncate the snapshot file (start fresh)
@@ -2306,7 +2306,7 @@ static int op_create(const Config& cfg) {
         std::ifstream snap_in(cfg.listed_incremental);
         if (snap_in) {
             std::string header;
-            std::getline(snap_in, header);  // consume STAR_SNAPSHOT_V1 header line
+            std::getline(snap_in, header);  // consume MUTAR_SNAPSHOT_V1 header line
             std::string line;
             while (std::getline(snap_in, line)) {
                 auto tab = line.find('\t');
@@ -2316,7 +2316,7 @@ static int op_create(const Config& cfg) {
                 char* endp = nullptr; errno = 0;
                 std::int64_t mt = std::strtoll(smts.c_str(), &endp, 10);
                 if (endp == smts.c_str() || *endp != '\0' || errno != 0) {
-                    print(stderr, "star: snapshot: malformed mtime entry '{}'; skipping\n", line);
+                    print(stderr, "mutar: snapshot: malformed mtime entry '{}'; skipping\n", line);
                     continue;
                 }
                 snapshot_map[sname] = mt;
@@ -2335,7 +2335,7 @@ static int op_create(const Config& cfg) {
     // Change directory if requested
     if (!cfg.directory.empty()) {
         if (::chdir(cfg.directory.c_str()) < 0) {
-            print(stderr, "star: -C {}: {}\n", cfg.directory, std::strerror(errno));
+            print(stderr, "mutar: -C {}: {}\n", cfg.directory, std::strerror(errno));
             return EXIT_FAILURE;
         }
     }
@@ -2351,7 +2351,7 @@ static int op_create(const Config& cfg) {
             struct stat fst{};
             if (::lstat(fspath.c_str(), &fst) == 0 && S_ISREG(fst.st_mode)) {
                 if (fst.st_mtime <= newer_cutoff) {
-                    star_warn(cfg, "newer",
+                    mutar_warn(cfg, "newer",
                               std::format("{}: file is not newer than cutoff; not dumped", fspath));
                     return;
                 }
@@ -2372,7 +2372,7 @@ static int op_create(const Config& cfg) {
         if (!cfg.transform_expr.empty()) {
             archname = apply_transform(archname, cfg.transform_expr);
             if (cfg.show_transformed && archname != raw_archname)
-                print(stderr, "star: {} -> {}\n", raw_archname, archname);
+                print(stderr, "mutar: {} -> {}\n", raw_archname, archname);
         }
 
         // Hard link detection for regular files with nlink > 1
@@ -2436,19 +2436,19 @@ static int op_create(const Config& cfg) {
                 s.close();
                 ++vol_num;
                 std::string next_vol = make_volume_name(cfg.archive_file, vol_num);
-                print(stderr, "star: Prepare volume #{} ({}) and press return: ",
+                print(stderr, "mutar: Prepare volume #{} ({}) and press return: ",
                       vol_num, next_vol);
                 std::fflush(stderr);
                 FILE* tty = std::fopen("/dev/tty", "r");
                 if (!tty) tty = stdin;
                 char dummy_line[256];
                 if (!std::fgets(dummy_line, sizeof(dummy_line), tty))
-                    print(stderr, "star: multi-volume: prompt read failed; continuing\n");
+                    print(stderr, "mutar: multi-volume: prompt read failed; continuing\n");
                 if (tty != stdin) std::fclose(tty);
                 // NOTE: Full multi-volume continuation requires ArchiveWriter stream
                 // swap which is not yet implemented. This prompt + accounting is the
                 // MVP. TODO: implement ArchiveWriter::swap_stream() for full support.
-                print(stderr, "star: warning: multi-volume stream swap not yet implemented;"
+                print(stderr, "mutar: warning: multi-volume stream swap not yet implemented;"
                       " continuing on current volume\n");
                 // Reopen the original stream to allow finish() to be called again
                 Config reopen_cfg = cfg;
@@ -2494,35 +2494,35 @@ static int op_create(const Config& cfg) {
         if (snap_fd >= 0) {
             FILE* snap_fp = ::fdopen(snap_fd, "w");
             if (snap_fp) {
-                std::fprintf(snap_fp, "STAR_SNAPSHOT_V1\n");
+                std::fprintf(snap_fp, "MUTAR_SNAPSHOT_V1\n");
                 for (auto& [sn, sm] : snap_out)
                     std::fprintf(snap_fp, "%s\t%lld\n", sn.c_str(), (long long)sm);
                 std::fclose(snap_fp);
                 if (::rename(tmp_path.c_str(), cfg.listed_incremental.c_str()) < 0) {
-                    print(stderr, "star: cannot rename snapshot '{}': {}\n",
+                    print(stderr, "mutar: cannot rename snapshot '{}': {}\n",
                           tmp_path, std::strerror(errno));
                     ::unlink(tmp_path.c_str());
                 }
             } else {
                 ::close(snap_fd);
                 ::unlink(tmp_path.c_str());
-                print(stderr, "star: cannot write snapshot '{}': {}\n",
+                print(stderr, "mutar: cannot write snapshot '{}': {}\n",
                       cfg.listed_incremental, std::strerror(errno));
             }
         } else {
-            print(stderr, "star: cannot create snapshot temp file for '{}': {}\n",
+            print(stderr, "mutar: cannot create snapshot temp file for '{}': {}\n",
                   cfg.listed_incremental, std::strerror(errno));
         }
     }
 
     // --verify: re-read the archive and check all entries are valid
     if (cfg.verify && exit_code == EXIT_SUCCESS) {
-        print(stderr, "star: Verifying archive...\n");
+        print(stderr, "mutar: Verifying archive...\n");
         Config vcfg = cfg;
         auto vres = ArchiveStream::open_read(vcfg);
         bool verify_ok = true;
         if (!vres) {
-            print(stderr, "star: verify: cannot reopen archive: {}\n", vres.error().message);
+            print(stderr, "mutar: verify: cannot reopen archive: {}\n", vres.error().message);
             verify_ok = false;
         } else {
             ArchiveStream& vs = *vres;
@@ -2537,9 +2537,9 @@ static int op_create(const Config& cfg) {
             }
             vs.close();
             if (verify_ok)
-                print(stderr, "star: Verify OK ({} entries)\n", verify_count);
+                print(stderr, "mutar: Verify OK ({} entries)\n", verify_count);
             else
-                print(stderr, "star: Verify FAILED\n");
+                print(stderr, "mutar: Verify FAILED\n");
         }
         if (!verify_ok) exit_code = EXIT_FAILURE;
     }
@@ -2552,7 +2552,7 @@ static int op_create(const Config& cfg) {
             struct stat cst{};
             if (::stat(it->second.c_str(), &cst) == 0 &&
                 cst.st_nlink > static_cast<nlink_t>(count)) {
-                star_warn(cfg, "missing-links",
+                mutar_warn(cfg, "missing-links",
                           std::format("{}: Not all links archived", it->second));
             }
         }
@@ -2578,7 +2578,7 @@ static int op_create(const Config& cfg) {
 static int op_extract(const Config& cfg) {
     auto res = ArchiveStream::open_read(cfg);
     if (!res) {
-        print(stderr, "star: {}\n", res.error().message);
+        print(stderr, "mutar: {}\n", res.error().message);
         return EXIT_FAILURE;
     }
     ArchiveStream& s = *res;
@@ -2587,7 +2587,7 @@ static int op_extract(const Config& cfg) {
     if (!cfg.index_file.empty()) {
         g_index_fp = std::fopen(cfg.index_file.c_str(), "w");
         if (!g_index_fp)
-            print(stderr, "star: {}: cannot open index file\n", cfg.index_file);
+            print(stderr, "mutar: {}: cannot open index file\n", cfg.index_file);
     }
 
     // Normalize user-supplied member names so "./file.txt" matches stored "file.txt"
@@ -2596,7 +2596,7 @@ static int op_extract(const Config& cfg) {
 
     if (!cfg.directory.empty()) {
         if (::chdir(cfg.directory.c_str()) < 0) {
-            print(stderr, "star: -C {}: {}\n", cfg.directory, std::strerror(errno));
+            print(stderr, "mutar: -C {}: {}\n", cfg.directory, std::strerror(errno));
             return EXIT_FAILURE;
         }
     }
@@ -2639,14 +2639,14 @@ static int op_extract(const Config& cfg) {
             if (cfg.multi_volume) {
                 ++extract_vol_num;
                 std::string next_vol = make_volume_name(cfg.archive_file, extract_vol_num);
-                print(stderr, "star: Prepare volume #{} ({}) and press return: ",
+                print(stderr, "mutar: Prepare volume #{} ({}) and press return: ",
                       extract_vol_num, next_vol);
                 std::fflush(stderr);
                 FILE* tty = std::fopen("/dev/tty", "r");
                 if (!tty) tty = stdin;
                 char dummy_vol[256];
                 if (!std::fgets(dummy_vol, sizeof(dummy_vol), tty)) {
-                    print(stderr, "star: multi-volume: prompt read failed (EOF or error); stopping\n");
+                    print(stderr, "mutar: multi-volume: prompt read failed (EOF or error); stopping\n");
                     if (tty != stdin) std::fclose(tty);
                     break;
                 }
@@ -2656,14 +2656,14 @@ static int op_extract(const Config& cfg) {
                 next_cfg.archive_file = next_vol;
                 auto next_res = ArchiveStream::open_read(next_cfg);
                 if (!next_res) {
-                    print(stderr, "star: cannot open volume {}: {}\n",
+                    print(stderr, "mutar: cannot open volume {}: {}\n",
                           next_vol, next_res.error().message);
                     break;
                 }
                 // NOTE: full multi-volume extraction would require swapping
                 // the reader's stream. This MVP just ends after one volume.
                 // TODO: implement ArchiveReader::swap_stream() for full support.
-                print(stderr, "star: warning: multi-volume stream swap not yet fully"
+                print(stderr, "mutar: warning: multi-volume stream swap not yet fully"
                       " implemented; stopping after volume {}\n", extract_vol_num - 1);
                 break;
             }
@@ -2706,7 +2706,7 @@ static int op_extract(const Config& cfg) {
 
         // --interactive: prompt user before extracting each file
         if (cfg.interactive) {
-            std::fprintf(stderr, "star: extract `%s'? [y/N] ", outpath.c_str());
+            std::fprintf(stderr, "mutar: extract `%s'? [y/N] ", outpath.c_str());
             std::fflush(stderr);
             std::string ans;
             // Prefer reading from the controlling terminal (/dev/tty) to avoid
@@ -2762,7 +2762,7 @@ static int op_extract(const Config& cfg) {
             bool path_exists = (::lstat(dpath.c_str(), &existing_st) == 0);
             if (path_exists && !S_ISDIR(existing_st.st_mode)) {
                 // Target path exists but is not a directory — cannot mkdir over it
-                print(stderr, "star: {}: Cannot overwrite non-directory with directory\n", dpath);
+                print(stderr, "mutar: {}: Cannot overwrite non-directory with directory\n", dpath);
                 reader.skip_entry(e);
                 break;
             }
@@ -2773,7 +2773,7 @@ static int op_extract(const Config& cfg) {
             // --no-overwrite-dir: when dir already existed, skip metadata update
             if (path_exists && cfg.no_overwrite_dir) {
                 if (cfg.verbose)
-                    print(stderr, "star: {}: directory already exists, skipping metadata update\n", dpath);
+                    print(stderr, "mutar: {}: directory already exists, skipping metadata update\n", dpath);
                 reader.skip_entry(e);
                 break;
             }
@@ -2799,7 +2799,7 @@ static int op_extract(const Config& cfg) {
         {
             ::unlink(outpath.c_str());
             if (::symlink(e.linkname.c_str(), outpath.c_str()) < 0) {
-                print(stderr, "star: symlink {}: {}\n", outpath, std::strerror(errno));
+                print(stderr, "mutar: symlink {}: {}\n", outpath, std::strerror(errno));
                 exit_code = EXIT_FAILURE;
             }
             reader.skip_entry(e);
@@ -2819,7 +2819,7 @@ static int op_extract(const Config& cfg) {
             if (!one_top.empty() && link_target != "." && link_target != "./")
                 link_target = one_top + "/" + link_target;
             if (::link(link_target.c_str(), outpath.c_str()) < 0) {
-                print(stderr, "star: hardlink {} -> {}: {}\n",
+                print(stderr, "mutar: hardlink {} -> {}: {}\n",
                            outpath, link_target, std::strerror(errno));
                 exit_code = EXIT_FAILURE;
             }
@@ -2833,7 +2833,7 @@ static int op_extract(const Config& cfg) {
             dev_t dev = ::makedev(e.devmajor, e.devminor);
             ::unlink(outpath.c_str());
             if (::mknod(outpath.c_str(), mtype | (e.mode & 07777), dev) < 0 && errno != EEXIST) {
-                print(stderr, "star: mknod {}: {}\n", outpath, std::strerror(errno));
+                print(stderr, "mutar: mknod {}: {}\n", outpath, std::strerror(errno));
                 exit_code = EXIT_FAILURE;
             }
             reader.skip_entry(e);
@@ -2843,7 +2843,7 @@ static int op_extract(const Config& cfg) {
         {
             ::unlink(outpath.c_str());
             if (::mkfifo(outpath.c_str(), e.mode & 07777) < 0) {
-                print(stderr, "star: mkfifo {}: {}\n", outpath, std::strerror(errno));
+                print(stderr, "mutar: mkfifo {}: {}\n", outpath, std::strerror(errno));
                 exit_code = EXIT_FAILURE;
             }
             reader.skip_entry(e);
@@ -2873,7 +2873,7 @@ static int op_extract(const Config& cfg) {
             bool exists = (::lstat(outpath.c_str(), &existing) == 0);
             if (exists) {
                 if (cfg.keep_old_files) {
-                    print(stderr, "star: {}: file exists\n", outpath);
+                    print(stderr, "mutar: {}: file exists\n", outpath);
                     reader.skip_entry(e);
                     exit_code = EXIT_FAILURE;
                     break;
@@ -2899,14 +2899,14 @@ static int op_extract(const Config& cfg) {
             if (!cfg.to_command.empty()) {
                 int pipefd[2];
                 if (::pipe(pipefd) < 0) {
-                    print(stderr, "star: pipe: {}\n", std::strerror(errno));
+                    print(stderr, "mutar: pipe: {}\n", std::strerror(errno));
                     reader.skip_entry(e);
                     exit_code = EXIT_FAILURE;
                     break;
                 }
                 pid_t pid = ::fork();
                 if (pid < 0) {
-                    print(stderr, "star: fork: {}\n", std::strerror(errno));
+                    print(stderr, "mutar: fork: {}\n", std::strerror(errno));
                     ::close(pipefd[0]); ::close(pipefd[1]);
                     reader.skip_entry(e);
                     exit_code = EXIT_FAILURE;
@@ -2930,7 +2930,7 @@ static int op_extract(const Config& cfg) {
                 total_bytes += e.size;
                 if (!data_ok || (WIFEXITED(status) && WEXITSTATUS(status) != 0)) {
                     if (!cfg.ignore_failed_read)
-                        print(stderr, "star: --to-command '{}' exited {}\n",
+                        print(stderr, "mutar: --to-command '{}' exited {}\n",
                               cfg.to_command, WEXITSTATUS(status));
                     // Non-fatal by default (mirrors GNU tar behaviour)
                 }
@@ -2945,7 +2945,7 @@ static int op_extract(const Config& cfg) {
 
             int fd = ::open(outpath.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0666);
             if (fd < 0) {
-                print(stderr, "star: {}: {}\n", outpath, std::strerror(errno));
+                print(stderr, "mutar: {}: {}\n", outpath, std::strerror(errno));
                 reader.skip_entry(e);
                 exit_code = EXIT_FAILURE;
                 break;
@@ -3027,7 +3027,7 @@ static int op_extract(const Config& cfg) {
 static int op_diff(const Config& cfg) {
     auto res = ArchiveStream::open_read(cfg);
     if (!res) {
-        print(stderr, "star: {}\n", res.error().message);
+        print(stderr, "mutar: {}\n", res.error().message);
         return EXIT_FAILURE;
     }
     ArchiveStream& s = *res;
@@ -3051,7 +3051,7 @@ static int op_diff(const Config& cfg) {
 
         struct stat st{};
         if (::lstat(fspath.c_str(), &st) < 0) {
-            print(stderr, "star: {}: {}\n", fspath, std::strerror(errno));
+            print(stderr, "mutar: {}: {}\n", fspath, std::strerror(errno));
             exit_code = EXIT_FAILURE;
             reader.skip_entry(e);
             continue;
@@ -3060,13 +3060,13 @@ static int op_diff(const Config& cfg) {
         // Compare size
         if (e.typeflag == REGTYPE || e.typeflag == AREGTYPE || e.typeflag == CONTTYPE) {
             if (st.st_size != e.size) {
-                print(stderr, "star: {}: size differs (archive={} fs={})\n",
+                print(stderr, "mutar: {}: size differs (archive={} fs={})\n",
                            fspath, e.size, st.st_size);
                 exit_code = EXIT_FAILURE;
             }
             // Compare mtime
             if (st.st_mtim.tv_sec != e.mtime) {
-                print(stderr, "star: {}: mtime differs\n", fspath);
+                print(stderr, "mutar: {}: mtime differs\n", fspath);
                 exit_code = EXIT_FAILURE;
             }
         }
@@ -3082,7 +3082,7 @@ static int op_append(const Config& cfg) {
     // The archive must be seekable (no compression)
     auto res = ArchiveStream::open_rdwr(cfg);
     if (!res) {
-        print(stderr, "star: {}\n", res.error().message);
+        print(stderr, "mutar: {}\n", res.error().message);
         return EXIT_FAILURE;
     }
     ArchiveStream& s = *res;
@@ -3125,7 +3125,7 @@ static int op_update(const Config& cfg) {
         Config rdcfg = cfg;
         auto res = ArchiveStream::open_read(rdcfg);
         if (!res) {
-            print(stderr, "star: {}\n", res.error().message);
+            print(stderr, "mutar: {}\n", res.error().message);
             return EXIT_FAILURE;
         }
         ArchiveStream& s = *res;
@@ -3162,13 +3162,13 @@ static int op_delete(const Config& cfg) {
     std::set<std::string> to_delete(cfg.files.begin(), cfg.files.end());
 
     // Build temp file name
-    std::string tmpfile = cfg.archive_file + ".star_tmp_XXXXXX";
+    std::string tmpfile = cfg.archive_file + ".mutar_tmp_XXXXXX";
     {
         std::vector<char> tmplate(tmpfile.begin(), tmpfile.end());
         tmplate.push_back('\0');
         int tmpfd = ::mkstemp(tmplate.data());
         if (tmpfd < 0) {
-            print(stderr, "star: mkstemp: {}\n", std::strerror(errno));
+            print(stderr, "mutar: mkstemp: {}\n", std::strerror(errno));
             return EXIT_FAILURE;
         }
         tmpfile = tmplate.data();
@@ -3179,7 +3179,7 @@ static int op_delete(const Config& cfg) {
     {
         auto res = ArchiveStream::open_read(cfg);
         if (!res) {
-            print(stderr, "star: {}\n", res.error().message);
+            print(stderr, "mutar: {}\n", res.error().message);
             ::unlink(tmpfile.c_str());
             return EXIT_FAILURE;
         }
@@ -3193,7 +3193,7 @@ static int op_delete(const Config& cfg) {
 
         auto dst_res = ArchiveStream::open_write(out_cfg);
         if (!dst_res) {
-            print(stderr, "star: {}\n", dst_res.error().message);
+            print(stderr, "mutar: {}\n", dst_res.error().message);
             ::unlink(tmpfile.c_str());
             return EXIT_FAILURE;
         }
@@ -3232,7 +3232,7 @@ static int op_delete(const Config& cfg) {
 
     // Replace original archive with temp file
     if (::rename(tmpfile.c_str(), cfg.archive_file.c_str()) < 0) {
-        print(stderr, "star: rename: {}\n", std::strerror(errno));
+        print(stderr, "mutar: rename: {}\n", std::strerror(errno));
         ::unlink(tmpfile.c_str());
         return EXIT_FAILURE;
     }
@@ -3244,7 +3244,7 @@ static int op_delete(const Config& cfg) {
 static int op_test_label(const Config& cfg) {
     auto res = ArchiveStream::open_read(cfg);
     if (!res) {
-        print(stderr, "star: {}\n", res.error().message);
+        print(stderr, "mutar: {}\n", res.error().message);
         return EXIT_FAILURE;
     }
     ArchiveStream& s = *res;
@@ -3273,7 +3273,7 @@ static int op_cat(const Config& cfg) {
     // Open destination (append mode, seekable)
     auto dst_res = ArchiveStream::open_rdwr(cfg);
     if (!dst_res) {
-        print(stderr, "star: {}\n", dst_res.error().message);
+        print(stderr, "mutar: {}\n", dst_res.error().message);
         return EXIT_FAILURE;
     }
     ArchiveStream& dst = *dst_res;
@@ -3299,7 +3299,7 @@ static int op_cat(const Config& cfg) {
         src_cfg.archive_file = srcfile;
         auto src_res = ArchiveStream::open_read(src_cfg);
         if (!src_res) {
-            print(stderr, "star: {}: {}\n", srcfile, src_res.error().message);
+            print(stderr, "mutar: {}: {}\n", srcfile, src_res.error().message);
             exit_code = EXIT_FAILURE;
             continue;
         }
@@ -3409,17 +3409,15 @@ enum LongOptVal : int {
     OPT_INTERACTIVE,
     OPT_WARNING,
     OPT_NO_SAME_ATTR,
-#ifdef STAR_HAVE_XATTR
+#ifdef MUTAR_HAVE_XATTR
     OPT_XATTRS,
     OPT_NO_XATTRS,
     OPT_XATTRS_INCLUDE,
     OPT_XATTRS_EXCLUDE,
 #endif
-#ifdef STAR_HAVE_SELINUX
     OPT_SELINUX,
     OPT_NO_SELINUX,
-#endif
-#ifdef STAR_HAVE_ACL
+#ifdef MUTAR_HAVE_ACL
     OPT_ACLS,
     OPT_NO_ACLS,
 #endif
@@ -3537,17 +3535,15 @@ static const struct option long_opts[] = {
     {"no-delay-directory-restore",no_argument,nullptr,OPT_NO_DELAY_DIR_RESTORE},
     {"sort",             required_argument, nullptr, OPT_SORT},
     // Extended attributes
-#ifdef STAR_HAVE_XATTR
+#ifdef MUTAR_HAVE_XATTR
     {"xattrs",           no_argument,       nullptr, OPT_XATTRS},
     {"no-xattrs",        no_argument,       nullptr, OPT_NO_XATTRS},
     {"xattrs-include",   required_argument, nullptr, OPT_XATTRS_INCLUDE},
     {"xattrs-exclude",   required_argument, nullptr, OPT_XATTRS_EXCLUDE},
 #endif
-#ifdef STAR_HAVE_SELINUX
     {"selinux",          no_argument,       nullptr, OPT_SELINUX},
     {"no-selinux",       no_argument,       nullptr, OPT_NO_SELINUX},
-#endif
-#ifdef STAR_HAVE_ACL
+#ifdef MUTAR_HAVE_ACL
     {"acls",             no_argument,       nullptr, OPT_ACLS},
     {"no-acls",          no_argument,       nullptr, OPT_NO_ACLS},
 #endif
@@ -3665,7 +3661,7 @@ static const struct option long_opts[] = {
 
 static void set_op(Config& cfg, Operation op, char flag) {
     if (cfg.op != Operation::None && cfg.op != op) {
-        print(stderr, "star: conflicting operations\n");
+        print(stderr, "mutar: conflicting operations\n");
         std::exit(EXIT_FAILURE);
     }
     cfg.op = op;
@@ -3678,7 +3674,7 @@ static void set_format(Config& cfg, std::string_view name) {
     else if (name == "ustar")                 cfg.fmt = Format::USTAR;
     else if (name == "pax" || name == "posix")cfg.fmt = Format::PAX;
     else {
-        print(stderr, "star: unknown format: {}\n", name);
+        print(stderr, "mutar: unknown format: {}\n", name);
         std::exit(EXIT_FAILURE);
     }
 }
@@ -3750,7 +3746,7 @@ static Config parse_args(int argc, char* argv[]) {
         case 'p': cfg.same_permissions  = true; break;
         case 's':
             cfg.preserve_order = true;
-            print(stderr, "star: warning: --preserve-order/-s is not yet implemented; option accepted but ignored\n");
+            print(stderr, "mutar: warning: --preserve-order/-s is not yet implemented; option accepted but ignored\n");
             break;
         case 'm': cfg.touch             = true; break;
         case 'S': cfg.sparse            = true; break;
@@ -3760,7 +3756,7 @@ static Config parse_args(int argc, char* argv[]) {
             char* end = nullptr; errno = 0;
             long val = std::strtol(::optarg, &end, 10);
             if (errno != 0 || end == ::optarg || *end != '\0' || val <= 0 || val > 32767) {
-                print(stderr, "star: invalid blocking factor '{}': must be 1..32767\n", ::optarg);
+                print(stderr, "mutar: invalid blocking factor '{}': must be 1..32767\n", ::optarg);
                 std::exit(EXIT_FAILURE);
             }
             cfg.blocking_factor = static_cast<int>(val);
@@ -3808,7 +3804,7 @@ static Config parse_args(int argc, char* argv[]) {
             char* end = nullptr; errno = 0;
             long val = std::strtol(::optarg, &end, 10);
             if (errno != 0 || end == ::optarg || *end != '\0' || val < 0) {
-                print(stderr, "star: invalid strip-components '{}'\n", ::optarg);
+                print(stderr, "mutar: invalid strip-components '{}'\n", ::optarg);
                 std::exit(EXIT_FAILURE);
             }
             cfg.strip_components = static_cast<int>(val);
@@ -3824,7 +3820,7 @@ static Config parse_args(int argc, char* argv[]) {
             char* endp = nullptr; errno = 0;
             long long sz = std::strtoll(::optarg, &endp, 10);
             if (errno || endp == ::optarg || *endp != '\0' || sz <= 0 || sz % BLOCKSIZE != 0) {
-                print(stderr, "star: invalid record-size '{}': must be a positive multiple of 512\n", ::optarg);
+                print(stderr, "mutar: invalid record-size '{}': must be a positive multiple of 512\n", ::optarg);
                 std::exit(EXIT_FAILURE);
             }
             cfg.blocking_factor  = static_cast<int>(sz / BLOCKSIZE);
@@ -3839,17 +3835,20 @@ static Config parse_args(int argc, char* argv[]) {
         case OPT_SHOW_OMITTED_DIRS:  cfg.show_omitted_dirs = true; break;
         case OPT_SHOW_TRANSFORMED:   cfg.show_transformed = true; break;
         case OPT_RESTRICT:           cfg.restrict_opt = true; break;
-#ifdef STAR_HAVE_XATTR
+#ifdef MUTAR_HAVE_XATTR
         case OPT_XATTRS:             cfg.xattrs = true; break;
         case OPT_NO_XATTRS:          cfg.xattrs = false; break;
         case OPT_XATTRS_INCLUDE:     cfg.xattrs_include.emplace_back(::optarg); break;
         case OPT_XATTRS_EXCLUDE:     cfg.xattrs_exclude.emplace_back(::optarg); break;
 #endif
-#ifdef STAR_HAVE_SELINUX
-        case OPT_SELINUX:            cfg.selinux = true; break;
-        case OPT_NO_SELINUX:         cfg.selinux = false; break;
-#endif
-#ifdef STAR_HAVE_ACL
+        case OPT_SELINUX:
+            print(stderr, "mutar: warning: SELinux support is not available (unsupported)\n");
+            cfg.selinux = false;
+            break;
+        case OPT_NO_SELINUX:
+            cfg.selinux = false;
+            break;
+#ifdef MUTAR_HAVE_ACL
         case OPT_ACLS:               cfg.acls = true; break;
         case OPT_NO_ACLS:            cfg.acls = false; break;
 #endif
@@ -3867,7 +3866,7 @@ static Config parse_args(int argc, char* argv[]) {
                 char* end = nullptr; errno = 0;
                 long val = std::strtol(::optarg, &end, 10);
                 if (errno != 0 || end == ::optarg || *end != '\0' || val <= 0) {
-                    print(stderr, "star: invalid occurrence '{}'\n", ::optarg);
+                    print(stderr, "mutar: invalid occurrence '{}'\n", ::optarg);
                     std::exit(EXIT_FAILURE);
                 }
                 cfg.occurrence = static_cast<int>(val);
@@ -3881,7 +3880,7 @@ static Config parse_args(int argc, char* argv[]) {
         case OPT_HOLE_DETECTION: {
             std::string_view method(::optarg ? ::optarg : "");
             if (method != "seek" && method != "raw") {
-                print(stderr, "star: invalid hole-detection method '{}': must be 'seek' or 'raw'\n", ::optarg);
+                print(stderr, "mutar: invalid hole-detection method '{}': must be 'seek' or 'raw'\n", ::optarg);
                 std::exit(EXIT_FAILURE);
             }
             cfg.hole_detection = ::optarg;
@@ -3895,7 +3894,7 @@ static Config parse_args(int argc, char* argv[]) {
             long val = std::strtol(::optarg, &end, 10);
             if (errno != 0 || end == ::optarg || *end != '\0' || val < 0 ||
                 static_cast<unsigned long>(val) > static_cast<unsigned long>(INT_MAX)) {
-                print(stderr, "star: invalid level '{}'\n", ::optarg);
+                print(stderr, "mutar: invalid level '{}'\n", ::optarg);
                 std::exit(EXIT_FAILURE);
             }
             cfg.level = static_cast<int>(val);
@@ -3943,7 +3942,7 @@ static Config parse_args(int argc, char* argv[]) {
             //  value > INT64_MAX/1024 absurd in practice).
             if (errno != 0 || endp == ::optarg || *endp != '\0' || val <= 0 ||
                 val > static_cast<long long>(std::numeric_limits<std::int64_t>::max() / 1024)) {
-                print(stderr, "star: invalid tape-length '{}'\n", ::optarg);
+                print(stderr, "mutar: invalid tape-length '{}'\n", ::optarg);
                 std::exit(EXIT_FAILURE);
             }
             cfg.tape_length = static_cast<std::int64_t>(val);
@@ -3969,7 +3968,7 @@ static Config parse_args(int argc, char* argv[]) {
                 char* end = nullptr; errno = 0;
                 long val = std::strtol(::optarg, &end, 10);
                 if (errno != 0 || end == ::optarg || *end != '\0' || val <= 0) {
-                    print(stderr, "star: invalid checkpoint '{}'\n", ::optarg);
+                    print(stderr, "mutar: invalid checkpoint '{}'\n", ::optarg);
                     std::exit(EXIT_FAILURE);
                 }
                 cfg.checkpoint = static_cast<int>(val);
@@ -4058,7 +4057,7 @@ static Config parse_args(int argc, char* argv[]) {
 
         case '?':
         default:
-            print(stderr, "Try 'star --help' for more information.\n");
+            print(stderr, "Try 'mutar --help' for more information.\n");
             std::exit(EXIT_FAILURE);
         }
     }
@@ -4070,7 +4069,7 @@ static Config parse_args(int argc, char* argv[]) {
     // Read files from -T / --files-from
     for (const auto& fname : cfg.files_from) {
         std::ifstream ifs(fname);
-        if (!ifs) { print(stderr, "star: {}: cannot open\n", fname); continue; }
+        if (!ifs) { print(stderr, "mutar: {}: cannot open\n", fname); continue; }
         if (cfg.null_terminated) {
             std::string content((std::istreambuf_iterator<char>(ifs)),
                                  std::istreambuf_iterator<char>());
@@ -4094,7 +4093,7 @@ static Config parse_args(int argc, char* argv[]) {
     // Process --exclude-from / -X files
     for (const auto& fname : cfg.exclude_from) {
         std::ifstream ifs(fname);
-        if (!ifs) { print(stderr, "star: {}: cannot open\n", fname); continue; }
+        if (!ifs) { print(stderr, "mutar: {}: cannot open\n", fname); continue; }
         std::string line;
         while (std::getline(ifs, line)) {
             if (!line.empty()) cfg.exclude_patterns.push_back(line);
@@ -4113,7 +4112,8 @@ static Config parse_args(int argc, char* argv[]) {
 static void print_usage(const char* prog) {
     print(
         "Usage: {0} [OPTION...] [FILE]...\n"
-        "GNU tar-compatible archiver (C++23 star implementation)\n"
+        "µtar (mutar) — GNU tar-compatible archiver (C++23)\n"
+        "Not Jörg Schilling's star (Schily tools).\n"
         "\nMain operations:\n"
         "  -A, --catenate, --concatenate   Append tar files to an archive\n"
         "  -c, --create                    Create a new archive\n"
@@ -4176,26 +4176,24 @@ static void print_usage(const char* prog) {
         "      --sort=ORDER                Directory sorting order: none (default), name or inode\n",
         prog);
     // Extended file attributes section — printed only when built with support
-#if defined(STAR_HAVE_XATTR) || defined(STAR_HAVE_ACL) || defined(STAR_HAVE_SELINUX)
+#if defined(MUTAR_HAVE_XATTR) || defined(MUTAR_HAVE_ACL)
     print("\nHandling of extended file attributes:\n");
-#ifdef STAR_HAVE_ACL
+#ifdef MUTAR_HAVE_ACL
     print(
         "      --acls                      Enable the POSIX ACLs support (accepted; store/restore not yet implemented)\n"
         "      --no-acls                   Disable the POSIX ACLs support\n");
 #endif
-#ifdef STAR_HAVE_SELINUX
-    print(
-        "      --selinux                   Enable the SELinux context support (accepted; store/restore not yet implemented)\n"
-        "      --no-selinux                Disable the SELinux context support\n");
-#endif
-#ifdef STAR_HAVE_XATTR
+#ifdef MUTAR_HAVE_XATTR
     print(
         "      --xattrs                    Enable extended attributes support (accepted; store/restore not yet implemented)\n"
         "      --no-xattrs                 Disable extended attributes support\n"
         "      --xattrs-exclude=MASK       Specify the exclude pattern for xattr keys\n"
         "      --xattrs-include=MASK       Specify the include pattern for xattr keys\n");
 #endif
-#endif // any extended attr feature
+#endif // xattr/acl
+    print(
+        "\nSELinux (not supported):\n"
+        "      --selinux, --no-selinux     Accepted for GNU tar CLI compatibility; no-ops\n");
     print(
         "\nDevice selection and switching:\n"
         "  -f, --file=ARCHIVE              Use archive file or device ARCHIVE\n"
@@ -4294,17 +4292,19 @@ static void print_usage(const char* prog) {
 }
 
 static void print_version() {
-    print("star (RetroCodeMess) 1.0 — C++23 GNU tar-compatible archiver\n"
-               "Format compatibility: v7, oldgnu, gnu, ustar, pax/posix\n"
-               "Based on GNU tar 1.35 format specification\n");
+    print("mutar (µtar) 1.0.0 — C++23 GNU tar-compatible archiver\n"
+               "Not Jörg Schilling's star (Schily tools).\n"
+               "Goal: ~99% GNU tar 1.35 compatibility (SELinux not supported).\n"
+               "Formats: v7, oldgnu, gnu, ustar, pax/posix\n"
+               "License: GPL-3.0-or-later\n");
 }
 
-} // namespace star
+} // namespace mutar
 
 // ── main ──────────────────────────────────────────────────────────────────────
 
 int main(int argc, char* argv[]) {
-    using namespace star;
+    using namespace mutar;
 
     if (argc < 2) {
         print_usage(argv[0]);
@@ -4321,7 +4321,7 @@ int main(int argc, char* argv[]) {
     Config cfg = parse_args(argc, argv);
 
     if (cfg.op == Operation::None) {
-        print(stderr, "star: You must specify one of the '-Acdtrux', "
+        print(stderr, "mutar: You must specify one of the '-Acdtrux', "
                            "'--delete' or '--test-label' options\n");
         return EXIT_FAILURE;
     }

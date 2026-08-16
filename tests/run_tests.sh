@@ -1,20 +1,20 @@
 #!/usr/bin/env bash
-# star/tests/run_tests.sh — Automated test harness for star
-# Usage: ./run_tests.sh [/path/to/star]
+# tests/run_tests.sh — Automated test harness for mutar (µtar)
+# Usage: ./run_tests.sh [/path/to/mutar]
 #
 # Uses test material from RetroCodeMess/src/ where available.
-# Compares star output against system tar for cross-validation.
+# Compares mutar output against system tar for cross-validation.
 set -euo pipefail
 
-STAR="${1:-$(dirname "$0")/../build/star}"
+MUTAR="${1:-$(dirname "$0")/../build/mutar}"
 TAR="${TAR:-tar}"
-TMPDIR_BASE="$(mktemp -d /tmp/star_tests.XXXXXX)"
+TMPDIR_BASE="$(mktemp -d /tmp/mutar_tests.XXXXXX)"
 trap 'rm -rf "$TMPDIR_BASE"' EXIT
 
 # Locate the repo src/ directory relative to this script's location
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
-SRC_DIR="${STAR_SRC_DIR:-$REPO_ROOT/src}"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+SRC_DIR="${MUTAR_SRC_DIR:-$REPO_ROOT/src}"
 
 PASS=0
 FAIL=0
@@ -65,11 +65,11 @@ test_create_list() {
     local W; W="$(mkwork T01)"
     make_tree "$W/input"
 
-    "$STAR" -cf "$W/test.tar" -C "$W/input" .
+    "$MUTAR" -cf "$W/test.tar" -C "$W/input" .
     
     # List must contain our files
     local listing
-    listing="$("$STAR" -tf "$W/test.tar")"
+    listing="$("$MUTAR" -tf "$W/test.tar")"
     echo "$listing" | grep -q "file1.txt"     || { echo "missing file1.txt"; return 1; }
     echo "$listing" | grep -q "dir1/file2.txt" || { echo "missing dir1/file2.txt"; return 1; }
     echo "$listing" | grep -q "dir1/subdir/file3.txt" || { echo "missing file3.txt"; return 1; }
@@ -81,9 +81,9 @@ test_create_extract() {
     local W; W="$(mkwork T02)"
     make_tree "$W/input"
 
-    "$STAR" -cf "$W/test.tar" -C "$W/input" .
+    "$MUTAR" -cf "$W/test.tar" -C "$W/input" .
     mkdir -p "$W/output"
-    "$STAR" -xf "$W/test.tar" -C "$W/output"
+    "$MUTAR" -xf "$W/test.tar" -C "$W/output"
 
     diff -rq "$W/input/dir1/file2.txt" "$W/output/dir1/file2.txt" || { echo "file2 mismatch"; return 1; }
     diff -rq "$W/input/dir2/file4.txt" "$W/output/dir2/file4.txt" || { echo "file4 mismatch"; return 1; }
@@ -97,10 +97,10 @@ test_create_extract() {
 test_verbose_list() {
     local W; W="$(mkwork T03)"
     make_tree "$W/input"
-    "$STAR" -cf "$W/test.tar" -C "$W/input" .
+    "$MUTAR" -cf "$W/test.tar" -C "$W/input" .
 
     local vlist
-    vlist="$("$STAR" -tvf "$W/test.tar")"
+    vlist="$("$MUTAR" -tvf "$W/test.tar")"
     # Verbose output should have permission field like -rw-r--r-- or similar
     echo "$vlist" | grep -qE '^[-dl]' || { echo "no permission field in verbose output"; return 1; }
     echo "$vlist" | grep -q "file1.txt" || { echo "file1.txt not in verbose list"; return 1; }
@@ -111,9 +111,9 @@ test_verbose_list() {
 test_symlink() {
     local W; W="$(mkwork T04)"
     make_tree "$W/input"
-    "$STAR" -cf "$W/test.tar" -C "$W/input" .
+    "$MUTAR" -cf "$W/test.tar" -C "$W/input" .
     mkdir -p "$W/output"
-    "$STAR" -xf "$W/test.tar" -C "$W/output"
+    "$MUTAR" -xf "$W/test.tar" -C "$W/output"
 
     [[ -L "$W/output/dir1/symlink.txt" ]] || { echo "symlink not extracted as symlink"; return 1; }
     local tgt
@@ -128,11 +128,11 @@ test_gzip() {
     local W; W="$(mkwork T05)"
     make_tree "$W/input"
 
-    "$STAR" -czf "$W/test.tar.gz" -C "$W/input" .
+    "$MUTAR" -czf "$W/test.tar.gz" -C "$W/input" .
     [[ -f "$W/test.tar.gz" ]] || { echo "archive not created"; return 1; }
 
     mkdir -p "$W/output"
-    "$STAR" -xzf "$W/test.tar.gz" -C "$W/output"
+    "$MUTAR" -xzf "$W/test.tar.gz" -C "$W/output"
     diff -q "$W/input/file1.txt" "$W/output/file1.txt" || { echo "gzip content mismatch"; return 1; }
     return 0
 }
@@ -143,9 +143,9 @@ test_bzip2() {
     local W; W="$(mkwork T06)"
     make_tree "$W/input"
 
-    "$STAR" -cjf "$W/test.tar.bz2" -C "$W/input" .
+    "$MUTAR" -cjf "$W/test.tar.bz2" -C "$W/input" .
     mkdir -p "$W/output"
-    "$STAR" -xjf "$W/test.tar.bz2" -C "$W/output"
+    "$MUTAR" -xjf "$W/test.tar.bz2" -C "$W/output"
     diff -q "$W/input/file1.txt" "$W/output/file1.txt" || { echo "bzip2 content mismatch"; return 1; }
     return 0
 }
@@ -156,9 +156,9 @@ test_xz() {
     local W; W="$(mkwork T07)"
     make_tree "$W/input"
 
-    "$STAR" -cJf "$W/test.tar.xz" -C "$W/input" .
+    "$MUTAR" -cJf "$W/test.tar.xz" -C "$W/input" .
     mkdir -p "$W/output"
-    "$STAR" -xJf "$W/test.tar.xz" -C "$W/output"
+    "$MUTAR" -xJf "$W/test.tar.xz" -C "$W/output"
     diff -q "$W/input/dir1/file2.txt" "$W/output/dir1/file2.txt" || { echo "xz content mismatch"; return 1; }
     return 0
 }
@@ -172,13 +172,13 @@ test_interop_read() {
     # Write with system tar
     "$TAR" -cf "$W/gnu.tar" -C "$W/input" .
     
-    # Read with star
+    # Read with mutar
     local listing
-    listing="$("$STAR" -tf "$W/gnu.tar")"
+    listing="$("$MUTAR" -tf "$W/gnu.tar")"
     echo "$listing" | grep -q "file1.txt" || { echo "star can't read tar archive"; return 1; }
 
     mkdir -p "$W/output"
-    "$STAR" -xf "$W/gnu.tar" -C "$W/output"
+    "$MUTAR" -xf "$W/gnu.tar" -C "$W/output"
     diff -q "$W/input/file1.txt" "$W/output/file1.txt" || { echo "interop extract mismatch"; return 1; }
     return 0
 }
@@ -189,8 +189,8 @@ test_interop_write() {
     local W; W="$(mkwork T09)"
     make_tree "$W/input"
 
-    # Write with star
-    "$STAR" -cf "$W/star.tar" -C "$W/input" .
+    # Write with mutar
+    "$MUTAR" -cf "$W/star.tar" -C "$W/input" .
 
     # Read with system tar
     local listing
@@ -208,9 +208,9 @@ test_longname() {
     mkdir -p "$longdir"
     echo "long path test" > "$longdir/file_with_a_somewhat_long_name_exceeding_100_chars_total.txt"
 
-    "$STAR" -cf "$W/long.tar" -C "$W/input" .
+    "$MUTAR" -cf "$W/long.tar" -C "$W/input" .
     mkdir -p "$W/output"
-    "$STAR" -xf "$W/long.tar" -C "$W/output"
+    "$MUTAR" -xf "$W/long.tar" -C "$W/output"
 
     find "$W/output" -name "*.txt" | grep -q "file_with_a_somewhat_long" || { echo "long file not extracted"; return 1; }
     return 0
@@ -220,7 +220,7 @@ test_longname() {
 test_ustar_format() {
     local W; W="$(mkwork T11)"
     make_tree "$W/input"
-    "$STAR" -cf "$W/ustar.tar" -H ustar -C "$W/input" .
+    "$MUTAR" -cf "$W/ustar.tar" -H ustar -C "$W/input" .
 
     # Verify magic
     local magic
@@ -236,9 +236,9 @@ test_pax_format() {
     mkdir -p "$W/input/aaaa/bbbb/cccc/dddd/eeee/ffff"
     echo "pax test" > "$W/input/aaaa/bbbb/cccc/dddd/eeee/ffff/ggggg_hhhh_iiii_jjjj.txt"
 
-    "$STAR" -cf "$W/pax.tar" --posix -C "$W/input" .
+    "$MUTAR" -cf "$W/pax.tar" --posix -C "$W/input" .
     mkdir -p "$W/output"
-    "$STAR" -xf "$W/pax.tar" -C "$W/output"
+    "$MUTAR" -xf "$W/pax.tar" -C "$W/output"
     find "$W/output" -name "*.txt" | grep -q "ggggg_hhhh" || { echo "pax file not extracted"; return 1; }
     return 0
 }
@@ -247,11 +247,11 @@ test_pax_format() {
 test_selective_extract() {
     local W; W="$(mkwork T13)"
     make_tree "$W/input"
-    "$STAR" -cf "$W/test.tar" -C "$W/input" .
+    "$MUTAR" -cf "$W/test.tar" -C "$W/input" .
     mkdir -p "$W/output"
 
     # Extract only file1.txt
-    "$STAR" -xf "$W/test.tar" -C "$W/output" ./file1.txt
+    "$MUTAR" -xf "$W/test.tar" -C "$W/output" ./file1.txt
     [[ -f "$W/output/file1.txt" ]] || { echo "file1.txt not extracted"; return 1; }
     [[ ! -f "$W/output/dir1/file2.txt" ]] || { echo "file2.txt should not be extracted"; return 1; }
     return 0
@@ -261,10 +261,10 @@ test_selective_extract() {
 test_strip_components() {
     local W; W="$(mkwork T14)"
     make_tree "$W/input"
-    "$STAR" -cf "$W/test.tar" -C "$W/input" .
+    "$MUTAR" -cf "$W/test.tar" -C "$W/input" .
     mkdir -p "$W/output"
 
-    "$STAR" -xf "$W/test.tar" -C "$W/output" --strip-components=1
+    "$MUTAR" -xf "$W/test.tar" -C "$W/output" --strip-components=1
     # dir1/file2.txt should appear as file2.txt
     [[ -f "$W/output/file2.txt" ]] || { echo "stripped path not found"; return 1; }
     return 0
@@ -274,10 +274,10 @@ test_strip_components() {
 test_exclude() {
     local W; W="$(mkwork T15)"
     make_tree "$W/input"
-    "$STAR" -cf "$W/test.tar" -C "$W/input" --exclude="*.bin" .
+    "$MUTAR" -cf "$W/test.tar" -C "$W/input" --exclude="*.bin" .
 
     local listing
-    listing="$("$STAR" -tf "$W/test.tar")"
+    listing="$("$MUTAR" -tf "$W/test.tar")"
     echo "$listing" | grep -q "binary.bin" && { echo "binary.bin should be excluded"; return 1; }
     echo "$listing" | grep -q "file1.txt"  || { echo "file1.txt should be present"; return 1; }
     return 0
@@ -287,10 +287,10 @@ test_exclude() {
 test_to_stdout() {
     local W; W="$(mkwork T16)"
     make_tree "$W/input"
-    "$STAR" -cf "$W/test.tar" -C "$W/input" .
+    "$MUTAR" -cf "$W/test.tar" -C "$W/input" .
 
     local content
-    content="$("$STAR" -xOf "$W/test.tar" ./file1.txt)"
+    content="$("$MUTAR" -xOf "$W/test.tar" ./file1.txt)"
     [[ "$content" == "hello world" ]] || { echo "stdout content wrong: $content"; return 1; }
     return 0
 }
@@ -300,12 +300,12 @@ test_read_tar_source() {
     local tarxz
     # Try known repo path
     tarxz="$SRC_DIR/tar-1.35.tar.xz"
-    [[ -f "$tarxz" ]] || { echo "tar source not found at $tarxz"; return 1; }
+    [[ -f "$tarxz" ]] || { echo "tar source not found at $tarxz (skip)"; return 0; }
     require_cmd xz T17 || return 0
 
     local W; W="$(mkwork T17)"
     local listing
-    listing="$("$STAR" -tJf "$tarxz" 2>&1 | head -20)"
+    listing="$("$MUTAR" -tJf "$tarxz" 2>&1 | head -20)"
     echo "$listing" | grep -q "tar-1.35" || { echo "can't list tar-1.35.tar.xz"; echo "$listing"; return 1; }
     return 0
 }
@@ -314,12 +314,12 @@ test_read_tar_source() {
 test_keep_old_files() {
     local W; W="$(mkwork T18)"
     make_tree "$W/input"
-    "$STAR" -cf "$W/test.tar" -C "$W/input" .
+    "$MUTAR" -cf "$W/test.tar" -C "$W/input" .
     mkdir -p "$W/output"
     echo "ORIGINAL" > "$W/output/file1.txt"
 
     # -k should NOT overwrite existing file
-    "$STAR" -xkf "$W/test.tar" -C "$W/output" 2>/dev/null || true
+    "$MUTAR" -xkf "$W/test.tar" -C "$W/output" 2>/dev/null || true
     local content
     content="$(cat "$W/output/file1.txt")"
     [[ "$content" == "ORIGINAL" ]] || { echo "file1.txt was overwritten: $content"; return 1; }
@@ -335,9 +335,9 @@ test_binary_content() {
     local orig_md5
     orig_md5="$(md5sum "$W/input/binary.bin" | cut -d' ' -f1)"
 
-    "$STAR" -cf "$W/test.tar" -C "$W/input" binary.bin
+    "$MUTAR" -cf "$W/test.tar" -C "$W/input" binary.bin
     mkdir -p "$W/output"
-    "$STAR" -xf "$W/test.tar" -C "$W/output"
+    "$MUTAR" -xf "$W/test.tar" -C "$W/output"
     local extr_md5
     extr_md5="$(md5sum "$W/output/binary.bin" | cut -d' ' -f1)"
 
@@ -354,9 +354,9 @@ test_large_size_encoding() {
     local orig_md5
     orig_md5="$(md5sum "$W/input/large.bin" | cut -d' ' -f1)"
 
-    "$STAR" -cf "$W/test.tar" -C "$W/input" large.bin
+    "$MUTAR" -cf "$W/test.tar" -C "$W/input" large.bin
     mkdir -p "$W/output"
-    "$STAR" -xf "$W/test.tar" -C "$W/output"
+    "$MUTAR" -xf "$W/test.tar" -C "$W/output"
     local extr_md5
     extr_md5="$(md5sum "$W/output/large.bin" | cut -d' ' -f1)"
 
@@ -374,13 +374,14 @@ test_repo_archives() {
         [[ -f "$f" ]] || continue
         # Use cat to avoid SIGPIPE from head -5 with pipefail
         local listing
-        listing="$("$STAR" -tf "$f" 2>&1)" || { echo "  ERR: $(basename "$f")"; err=$((err+1)); continue; }
+        listing="$("$MUTAR" -tf "$f" 2>&1)" || { echo "  ERR: $(basename "$f")"; err=$((err+1)); continue; }
         local first; first="$(echo "$listing" | head -1)"
         echo "  OK: $(basename "$f") → $first"
         ok=$((ok+1))
     done
     echo "  Summary: $ok OK, $err ERR"
-    [[ $ok -gt 0 ]] || { echo "could not read any archive from src/"; return 1; }
+    [[ $ok -gt 0 || $err -eq 0 ]] || { echo "errors reading archives from src/"; return 1; }
+    [[ $ok -gt 0 ]] || { echo "no sample archives in src/ (skip)"; return 0; }
     return 0
 }
 
@@ -391,9 +392,9 @@ test_hardlink() {
     echo "original" > "$W/input/orig.txt"
     ln "$W/input/orig.txt" "$W/input/hardlink.txt"
 
-    "$STAR" -cf "$W/test.tar" -C "$W/input" .
+    "$MUTAR" -cf "$W/test.tar" -C "$W/input" .
     mkdir -p "$W/output"
-    "$STAR" -xf "$W/test.tar" -C "$W/output"
+    "$MUTAR" -xf "$W/test.tar" -C "$W/output"
 
     # Both files should exist
     [[ -f "$W/output/orig.txt" ]]     || { echo "orig.txt missing"; return 1; }
@@ -406,9 +407,9 @@ test_empty_archive() {
     local W; W="$(mkwork T23)"
     mkdir -p "$W/empty"
 
-    "$STAR" -cf "$W/empty.tar" -C "$W/empty" .
+    "$MUTAR" -cf "$W/empty.tar" -C "$W/empty" .
     local listing
-    listing="$("$STAR" -tf "$W/empty.tar" 2>/dev/null)"
+    listing="$("$MUTAR" -tf "$W/empty.tar" 2>/dev/null)"
     # May have a single "." entry or be completely empty — both are fine
     return 0
 }
@@ -419,9 +420,9 @@ test_v7_format() {
     mkdir -p "$W/input"
     echo "v7 test" > "$W/input/file.txt"
 
-    "$STAR" -cf "$W/v7.tar" -H v7 -C "$W/input" file.txt
+    "$MUTAR" -cf "$W/v7.tar" -H v7 -C "$W/input" file.txt
     mkdir -p "$W/output"
-    "$STAR" -xf "$W/v7.tar" -C "$W/output"
+    "$MUTAR" -xf "$W/v7.tar" -C "$W/output"
     local content
     content="$(cat "$W/output/file.txt")"
     [[ "$content" == "v7 test" ]] || { echo "v7 content wrong: $content"; return 1; }
@@ -430,8 +431,14 @@ test_v7_format() {
 
 # ── T25: --version / --help ───────────────────────────────────────────────────
 test_help_version() {
-    "$STAR" --version | grep -q "star" || { echo "--version failed"; return 1; }
-    "$STAR" --help    | grep -q "star" || { echo "--help failed"; return 1; }
+    # Capture full output (avoid SIGPIPE+pipefail when grep -q closes early)
+    local ver help
+    ver="$("$MUTAR" --version)" || { echo "--version failed"; return 1; }
+    help="$("$MUTAR" --help)" || { echo "--help failed"; return 1; }
+    echo "$ver" | grep -q "mutar" || { echo "--version missing mutar brand"; return 1; }
+    echo "$ver" | grep -q "99%" || { echo "--version missing 99% compat note"; return 1; }
+    echo "$help" | grep -q "mutar" || { echo "--help missing mutar"; return 1; }
+    echo "$help" | grep -q "Schilling" || { echo "--help missing Schily disclaimer"; return 1; }
     return 0
 }
 
@@ -442,24 +449,24 @@ test_help_version() {
 test_aregtype_extract() {
     local src_dir="$SRC_DIR"
     local sidplay="$src_dir/sidplay-2.0.9.tar.gz"
-    [[ -f "$sidplay" ]] || { echo "sidplay-2.0.9.tar.gz not found"; return 1; }
+    [[ -f "$sidplay" ]] || { echo "sidplay-2.0.9.tar.gz not found (skip)"; return 0; }
     require_cmd gzip T26 || return 0
 
     local W; W="$(mkwork T26)"
 
     # Step 1: extract the archive
-    "$STAR" -xzf "$sidplay" -C "$W"
+    "$MUTAR" -xzf "$sidplay" -C "$W"
     local nfiles
     nfiles="$(find "$W" -type f | wc -l)"
     [[ "$nfiles" -gt 0 ]] || { echo "no regular files extracted (AREGTYPE bug)"; return 1; }
 
     # Step 2: repack what we extracted
     local topdir; topdir="$(ls "$W" | head -1)"
-    "$STAR" -czf "$W/repack.tar.gz" -C "$W" "$topdir"
+    "$MUTAR" -czf "$W/repack.tar.gz" -C "$W" "$topdir"
 
     # Step 3: re-extract the repacked archive
     mkdir -p "$W/verify"
-    "$STAR" -xzf "$W/repack.tar.gz" -C "$W/verify"
+    "$MUTAR" -xzf "$W/repack.tar.gz" -C "$W/verify"
     local nfiles2
     nfiles2="$(find "$W/verify" -type f | wc -l)"
     [[ "$nfiles2" -eq "$nfiles" ]] || {
@@ -487,16 +494,16 @@ test_all_roundtrip() {
         mkdir -p "$W/e1" "$W/e2"
 
         # Extract
-        "$STAR" -xf "$arc" -C "$W/e1" 2>/dev/null
+        "$MUTAR" -xf "$arc" -C "$W/e1" 2>/dev/null
         local n1; n1="$(find "$W/e1" -type f | wc -l)"
         [[ "$n1" -gt 0 ]] || { echo "  ERR $name: 0 files extracted"; err=$((err+1)); continue; }
 
         # Repack (uncompressed to avoid gzip dependency in this test)
         local top; top="$(ls "$W/e1" | head -1)"
-        "$STAR" -cf "$W/repack.tar" -C "$W/e1" "$top" 2>/dev/null
+        "$MUTAR" -cf "$W/repack.tar" -C "$W/e1" "$top" 2>/dev/null
 
         # Re-extract
-        "$STAR" -xf "$W/repack.tar" -C "$W/e2" 2>/dev/null
+        "$MUTAR" -xf "$W/repack.tar" -C "$W/e2" 2>/dev/null
         local n2; n2="$(find "$W/e2" -type f | wc -l)"
 
         if [[ "$n1" -eq "$n2" ]]; then
@@ -521,8 +528,8 @@ test_newer_filter() {
     touch -t 200001010000 "$W/input/old.txt"   # year 2000 — old
     touch -t 203001010000 "$W/input/new.txt"   # year 2030 — future/new
 
-    "$STAR" -cf "$W/test.tar" -C "$W/input" --newer="2020-01-01" . 2>/dev/null
-    local listing; listing="$("$STAR" -tf "$W/test.tar" 2>/dev/null)"
+    "$MUTAR" -cf "$W/test.tar" -C "$W/input" --newer="2020-01-01" . 2>/dev/null
+    local listing; listing="$("$MUTAR" -tf "$W/test.tar" 2>/dev/null)"
     echo "$listing" | grep -q "new.txt"  || { echo "new.txt missing"; return 1; }
     echo "$listing" | grep -q "old.txt"  && { echo "old.txt should be excluded"; return 1; }
     return 0
@@ -535,9 +542,9 @@ test_mtime_override() {
     echo "hello" > "$W/input/file.txt"
     touch -t 202301010000 "$W/input/file.txt"   # set to 2023
 
-    "$STAR" -cf "$W/test.tar" --mtime="2000-06-15" -C "$W/input" . 2>/dev/null
+    "$MUTAR" -cf "$W/test.tar" --mtime="2000-06-15" -C "$W/input" . 2>/dev/null
     local ts
-    ts="$("$STAR" -tvf "$W/test.tar" 2>/dev/null | grep "file.txt" | awk '{print $4}')"
+    ts="$("$MUTAR" -tvf "$W/test.tar" 2>/dev/null | grep "file.txt" | awk '{print $4}')"
     [[ "$ts" == "2000-06-15" ]] || { echo "mtime wrong: $ts (expected 2000-06-15)"; return 1; }
     return 0
 }
@@ -549,9 +556,9 @@ test_mode_override() {
     echo "hello" > "$W/input/file.txt"
     chmod 755 "$W/input/file.txt"
 
-    "$STAR" -cf "$W/test.tar" --mode=640 -C "$W/input" . 2>/dev/null
+    "$MUTAR" -cf "$W/test.tar" --mode=640 -C "$W/input" . 2>/dev/null
     local perm
-    perm="$("$STAR" -tvf "$W/test.tar" 2>/dev/null | grep "file.txt" | awk '{print $1}')"
+    perm="$("$MUTAR" -tvf "$W/test.tar" 2>/dev/null | grep "file.txt" | awk '{print $1}')"
     [[ "$perm" == "-rw-r-----" ]] || { echo "mode wrong: $perm (expected -rw-r-----)"; return 1; }
     return 0
 }
@@ -563,14 +570,14 @@ test_transform() {
     echo "data" > "$W/input/original.txt"
 
     # Create with transform: original.txt → modified.txt
-    "$STAR" -cf "$W/test.tar" --transform='s/original/modified/' -C "$W/input" . 2>/dev/null
-    local listing; listing="$("$STAR" -tf "$W/test.tar" 2>/dev/null)"
+    "$MUTAR" -cf "$W/test.tar" --transform='s/original/modified/' -C "$W/input" . 2>/dev/null
+    local listing; listing="$("$MUTAR" -tf "$W/test.tar" 2>/dev/null)"
     echo "$listing" | grep -q "modified.txt"  || { echo "modified.txt missing"; return 1; }
     echo "$listing" | grep -q "original.txt"  && { echo "original.txt should be renamed"; return 1; }
 
     # Extract with transform
     mkdir -p "$W/out"
-    "$STAR" -xf "$W/test.tar" --transform='s/modified/extracted/' -C "$W/out" 2>/dev/null
+    "$MUTAR" -xf "$W/test.tar" --transform='s/modified/extracted/' -C "$W/out" 2>/dev/null
     [[ -f "$W/out/extracted.txt" ]] || { echo "extracted.txt missing"; return 1; }
     return 0
 }
@@ -581,11 +588,11 @@ test_ignore_zeros() {
     mkdir -p "$W/input"
     echo "content" > "$W/input/file.txt"
 
-    "$STAR" -cf "$W/a.tar" -C "$W/input" . 2>/dev/null
+    "$MUTAR" -cf "$W/a.tar" -C "$W/input" . 2>/dev/null
     cat "$W/a.tar" "$W/a.tar" > "$W/concat.tar"
 
-    local c1; c1="$("$STAR" -tf  "$W/concat.tar" 2>/dev/null | grep "file.txt" | wc -l)"
-    local c2; c2="$("$STAR" -itf "$W/concat.tar" 2>/dev/null | grep "file.txt" | wc -l)"
+    local c1; c1="$("$MUTAR" -tf  "$W/concat.tar" 2>/dev/null | grep "file.txt" | wc -l)"
+    local c2; c2="$("$MUTAR" -itf "$W/concat.tar" 2>/dev/null | grep "file.txt" | wc -l)"
 
     [[ "$c1" -eq 1 ]] || { echo "without -i expected 1 file.txt, got $c1"; return 1; }
     [[ "$c2" -eq 2 ]] || { echo "with -i expected 2 file.txt (both copies), got $c2"; return 1; }
@@ -599,7 +606,7 @@ test_totals() {
     echo "hello" > "$W/input/file.txt"
 
     local out
-    out="$("$STAR" -cf "$W/test.tar" --totals -C "$W/input" . 2>&1)"
+    out="$("$MUTAR" -cf "$W/test.tar" --totals -C "$W/input" . 2>&1)"
     echo "$out" | grep -qi "total bytes" || { echo "no totals output: $out"; return 1; }
     return 0
 }
@@ -610,8 +617,8 @@ test_block_number() {
     mkdir -p "$W/input"
     echo "data" > "$W/input/file.txt"
 
-    "$STAR" -cf "$W/test.tar" -C "$W/input" . 2>/dev/null
-    local first; first="$("$STAR" -Rtf "$W/test.tar" 2>/dev/null | head -1)"
+    "$MUTAR" -cf "$W/test.tar" -C "$W/input" . 2>/dev/null
+    local first; first="$("$MUTAR" -Rtf "$W/test.tar" 2>/dev/null | head -1)"
     # Should start with "N: " where N is a number
     [[ "$first" =~ ^[0-9]+:\ .*$ ]] || { echo "no block-number prefix: $first"; return 1; }
     return 0
@@ -623,7 +630,7 @@ test_remove_files() {
     mkdir -p "$W/input"
     echo "delete me" > "$W/input/gone.txt"
 
-    "$STAR" -cf "$W/test.tar" --remove-files -C "$W/input" gone.txt 2>/dev/null
+    "$MUTAR" -cf "$W/test.tar" --remove-files -C "$W/input" gone.txt 2>/dev/null
     [[ ! -f "$W/input/gone.txt" ]] || { echo "gone.txt still exists after --remove-files"; return 1; }
     [[ -f "$W/test.tar" ]] || { echo "archive not created"; return 1; }
     return 0
@@ -638,7 +645,7 @@ test_atime_preserve() {
     touch -a -t 200506151200 "$W/input/file.txt"
     local orig_atime; orig_atime="$(stat -c %X "$W/input/file.txt")"
 
-    "$STAR" -cf "$W/test.tar" --atime-preserve -C "$W/input" file.txt 2>/dev/null
+    "$MUTAR" -cf "$W/test.tar" --atime-preserve -C "$W/input" file.txt 2>/dev/null
     local new_atime; new_atime="$(stat -c %X "$W/input/file.txt")"
 
     [[ "$orig_atime" -eq "$new_atime" ]] || {
@@ -653,7 +660,7 @@ test_record_size() {
     echo "hello" > "$W/input/file.txt"
 
     # record-size=1024 → blocking_factor=2 → 2×512=1024 byte records
-    "$STAR" -cf "$W/test.tar" --record-size=1024 -C "$W/input" . 2>/dev/null || return 1
+    "$MUTAR" -cf "$W/test.tar" --record-size=1024 -C "$W/input" . 2>/dev/null || return 1
     local sz; sz="$(stat -c %s "$W/test.tar")"
     # archive should be a multiple of 1024
     [[ $((sz % 1024)) -eq 0 ]] || { echo "archive size $sz not multiple of 1024"; return 1; }
@@ -666,9 +673,9 @@ test_one_top_level() {
     mkdir -p "$W/input"
     echo "content" > "$W/input/file.txt"
 
-    "$STAR" -cf "$W/test.tar" -C "$W" input/file.txt 2>/dev/null
+    "$MUTAR" -cf "$W/test.tar" -C "$W" input/file.txt 2>/dev/null
     mkdir -p "$W/out"
-    "$STAR" -xf "$W/test.tar" --one-top-level=mydir -C "$W/out" 2>/dev/null
+    "$MUTAR" -xf "$W/test.tar" --one-top-level=mydir -C "$W/out" 2>/dev/null
     [[ -f "$W/out/mydir/input/file.txt" ]] || {
         echo "file not under mydir/; out: $(find "$W/out" -type f)"; return 1; }
     return 0
@@ -686,10 +693,10 @@ test_to_command() {
         SKIP=$((SKIP+1)); return 0
     fi
 
-    "$STAR" -cf "$W/test.tar" -C "$W/input" . 2>/dev/null
+    "$MUTAR" -cf "$W/test.tar" -C "$W/input" . 2>/dev/null
 
     # Run extraction; non-zero exit is unexpected but not a hard requirement
-    if ! "$STAR" -xf "$W/test.tar" --to-command="cat > $W/tocommand_out.txt" 2>/dev/null; then
+    if ! "$MUTAR" -xf "$W/test.tar" --to-command="cat > $W/tocommand_out.txt" 2>/dev/null; then
         echo "  SKIP: --to-command invocation returned non-zero"
         SKIP=$((SKIP+1)); return 0
     fi
@@ -718,7 +725,7 @@ test_sparse() {
     local logical_size; logical_size="$(stat -c %s "$W/input/sparse.bin")"
 
     # Archive with --sparse
-    "$STAR" -cSf "$W/sparse.tar" -C "$W/input" sparse.bin 2>/dev/null
+    "$MUTAR" -cSf "$W/sparse.tar" -C "$W/input" sparse.bin 2>/dev/null
 
     # The archive should be much smaller than 10MB
     local arch_size; arch_size="$(stat -c %s "$W/sparse.tar")"
@@ -729,7 +736,7 @@ test_sparse() {
 
     # Extract and verify content and size
     mkdir -p "$W/out"
-    "$STAR" -xf "$W/sparse.tar" -C "$W/out" 2>/dev/null
+    "$MUTAR" -xf "$W/sparse.tar" -C "$W/out" 2>/dev/null
     [[ -f "$W/out/sparse.bin" ]] || { echo "sparse.bin not extracted"; return 1; }
 
     local out_size; out_size="$(stat -c %s "$W/out/sparse.bin")"
@@ -751,17 +758,17 @@ test_hardlink_dedup() {
     ln "$W/input/orig.txt" "$W/input/link1.txt"
     ln "$W/input/orig.txt" "$W/input/link2.txt"
 
-    "$STAR" -cf "$W/test.tar" -C "$W/input" . 2>/dev/null
+    "$MUTAR" -cf "$W/test.tar" -C "$W/input" . 2>/dev/null
 
     # The archive should contain exactly ONE copy of the data
     # and TWO hard link entries (one regular + two LNKTYPE)
-    local verbose; verbose="$("$STAR" -tvf "$W/test.tar" 2>/dev/null)"
+    local verbose; verbose="$("$MUTAR" -tvf "$W/test.tar" 2>/dev/null)"
     local h_count; h_count="$(echo "$verbose" | grep -c "^h" || true)"
     [[ "$h_count" -ge 2 ]] || { echo "expected >=2 hard link entries, got $h_count"; return 1; }
 
     # Extract and verify hard link relationship
     mkdir -p "$W/out"
-    "$STAR" -xf "$W/test.tar" -C "$W/out" 2>/dev/null
+    "$MUTAR" -xf "$W/test.tar" -C "$W/out" 2>/dev/null
     # All three files should have the same content
     cmp -s "$W/out/orig.txt"  "$W/out/link1.txt" || { echo "link1 content mismatch"; return 1; }
     cmp -s "$W/out/orig.txt"  "$W/out/link2.txt" || { echo "link2 content mismatch"; return 1; }
@@ -770,11 +777,11 @@ test_hardlink_dedup() {
 
 # ── Run all tests ──────────────────────────────────────────────────────────────
 echo "======================================="
-echo " star test suite"
-echo " star binary: $STAR"
+echo " mutar (µtar) test suite"
+echo " mutar binary: $MUTAR"
 echo "======================================="
 
-[[ -x "$STAR" ]] || { echo "FATAL: star binary not found or not executable: $STAR"; exit 1; }
+[[ -x "$MUTAR" ]] || { echo "FATAL: star binary not found or not executable: $MUTAR"; exit 1; }
 
 run_test "T01 create+list"             test_create_list
 run_test "T02 create+extract"          test_create_extract

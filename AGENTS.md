@@ -1,19 +1,19 @@
-# AGENTS.md — star/ Sub-Project Agent Instructions
+# AGENTS.md — µtar (mutar) Agent Instructions
 
 This file is read by GitHub Copilot coding agents and any other AI coding agent before
-starting work in the `star/` sub-project. It extends the repo-wide rules in
+starting work in the mutar project. It extends the repo-wide rules in
 `AGENTS.md` (root) and `.github/copilot-instructions.md`.
 
 ---
 
-## Quick-Start Checklist for star/ Work
+## Quick-Start Checklist for mutar Work
 
 Before writing any code:
 
 - [ ] Read `/AGENTS.md` (root — repo-wide rules)
 - [ ] Read `/.github/copilot-instructions.md` (build/test/debug strategy)
 - [ ] Read `/.github/instructions/star.instructions.md` (path-specific rules)
-- [ ] **Read `star/tar.1` in full** — this is the authoritative spec
+- [ ] **Read `tar.1` in full** — this is the authoritative spec
 - [ ] Install required tools (see below)
 
 ---
@@ -33,7 +33,7 @@ sudo apt-get update && sudo apt-get install -y \
 ## Build with Sanitizers (Mandatory for Debug/Test)
 
 ```bash
-cd star
+cd /path/to/mutar
 cmake -B build \
   -DCMAKE_BUILD_TYPE=Debug \
   -DCMAKE_CXX_FLAGS="-std=c++23 -ggdb3 -O0 -gdwarf-5 \
@@ -47,11 +47,11 @@ cd build && ctest --output-on-failure
 
 ---
 
-## The Prime Directive for star/
+## The Prime Directive for mutar
 
-> **Read `star/tar.1` before claiming any option is implemented.**
+> **Read `tar.1` before claiming any option is implemented.**
 
-The man page is the ground truth. If `star/src/star.cpp` says it handles `--pax-option` but the code
+The man page is the ground truth. If `src/mutar.cpp` says it handles `--pax-option` but the code
 is `break; // no-op`, then `--pax-option` is **not implemented**, regardless of what any
 previous PR claimed.
 
@@ -59,7 +59,7 @@ previous PR claimed.
 
 ## Honest Status Reporting
 
-Every PR for `star/` must include a status table like this:
+Every PR for mutar must include a status table like this:
 
 | Option | Status | Notes |
 |--------|--------|-------|
@@ -75,7 +75,7 @@ Status key:
 
 ---
 
-## Testing Requirements for star/
+## Testing Requirements for mutar
 
 ### Mandatory Coverage
 
@@ -88,7 +88,7 @@ Status key:
 3. **Sparse file tests** — create a sparse file, archive with `-S`, extract, verify the
    extracted file is still sparse (or bit-identical).
 
-4. **Boundary tests** — `star/tests/boundary_tests.cpp` and the `star_boundary_tests` CTest
+4. **Boundary tests** — `tests/boundary_tests.cpp` and the `mutar_boundary_tests` CTest
    target are the canonical model.
 
 5. **Sanitizer-clean** — all tests must pass with `-fsanitize=address,undefined
@@ -105,7 +105,7 @@ PR descriptions must include copied test output showing:
 
 ## Help Text Requirements
 
-Every PR that touches option parsing must update `print_usage()` in `star/src/star.cpp`:
+Every PR that touches option parsing must update `print_usage()` in `src/mutar.cpp`:
 
 - All implemented options must appear in help text.
 - No-op / stub options must either be absent from help or marked `(not yet implemented)`.
@@ -118,10 +118,10 @@ Every PR that touches option parsing must update `print_usage()` in `star/src/st
 
 For any PR changing star/ behavior:
 
-- [ ] `star/src/star.cpp` — update `print_usage()` if options added/changed
-- [ ] `star/README.md` — update feature status table
-- [ ] `star/ARCHITECTURE.md` — update if implementation approach changed
-- [ ] `star/PROGRESS.md` — add proof entry: what was done, how it was tested, what remains
+- [ ] `src/mutar.cpp` — update `print_usage()` if options added/changed
+- [ ] `README.md` — update feature status table
+- [ ] `ARCHITECTURE.md` — update if implementation approach changed
+- [ ] `COMPATIBILITY_PROGRESS.md` — add proof entry: what was done, how it was tested, what remains
 
 ---
 
@@ -144,7 +144,7 @@ See `/.github/instructions/star.instructions.md` section 5 for the full list. Su
 
 ## Security Rules for star/
 
-- Temporary work directories: use `mkdtemp()`, not `/tmp/star_fixed_name`.
+- Temporary work directories: use `mkdtemp()`, not `/tmp/mutar_fixed_name`.
 - Archive extraction paths: validate that extracted paths do not escape the destination
   directory (path traversal / zip-slip vulnerability).
 - Size inputs: validate `entry_size` and block counts before allocation.
@@ -154,3 +154,10 @@ See `/.github/instructions/star.instructions.md` section 5 for the full list. Su
 ---
 
 *Read repo root `AGENTS.md` and `.github/copilot-instructions.md` before this file.*
+
+
+## SELinux policy
+
+SELinux (`--selinux` / `--no-selinux`) is **unsupported** by project policy (no test hardware).
+Options are accepted as no-ops with a warning. Do not claim SELinux support.
+Compatibility goal is **~99%** GNU tar 1.35, not 100%.

@@ -1,4 +1,4 @@
-// star.hpp — Modern C++23 Super-Tar (star) — header
+// mutar.hpp — µtar (mutar) C++23 GNU-tar-compatible archiver — header
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
 // Block/header layout mirrors GNU tar's tar.h (src/tar.h in tar-1.35).
@@ -26,20 +26,16 @@
 
 // Optional feature headers — included only when the corresponding library was
 // detected at cmake configure time. These conditional includes make the
-// optional APIs available to star.cpp when the features are enabled.
-#ifdef STAR_HAVE_XATTR
+// optional APIs available to mutar.cpp when the features are enabled.
+#ifdef MUTAR_HAVE_XATTR
 #  include <sys/xattr.h>
 #endif
 
-#ifdef STAR_HAVE_ACL
+#ifdef MUTAR_HAVE_ACL
 #  include <sys/acl.h>
 #endif
 
-#ifdef STAR_HAVE_SELINUX
-#  include <selinux/selinux.h>
-#endif
-
-namespace star {
+namespace mutar {
 
 // ── Block layout ──────────────────────────────────────────────────────────────
 // 512 bytes per block; default blocking factor 20 → 10 240 bytes per record.
@@ -257,13 +253,13 @@ struct Config {
     bool null_terminated     = false;   // --null / -0
     bool seek                = true;    // -n / --seek (default auto)
     bool force_local         = false;   // --force-local
-    bool xattrs              = false;   // --xattrs (only available when STAR_HAVE_XATTR)
-#ifdef STAR_HAVE_XATTR
+    bool xattrs              = false;   // --xattrs (only available when MUTAR_HAVE_XATTR)
+#ifdef MUTAR_HAVE_XATTR
     std::vector<std::string> xattrs_include; // --xattrs-include=MASK
     std::vector<std::string> xattrs_exclude; // --xattrs-exclude=MASK
 #endif
-    bool acls                = false;   // --acls   (only available when STAR_HAVE_ACL)
-    bool selinux             = false;   // --selinux (only available when STAR_HAVE_SELINUX)
+    bool acls                = false;   // --acls   (only available when MUTAR_HAVE_ACL)
+    bool selinux             = false;   // --selinux accepted as no-op (unsupported)
     bool posix               = false;   // --posix (=pax format)
     bool old_archive         = false;   // --old-archive (=v7)
     bool utc_time            = false;   // --utc
@@ -470,4 +466,4 @@ inline Format detect_format(const Block& blk) noexcept {
     return Format::V7;
 }
 
-} // namespace star
+} // namespace mutar

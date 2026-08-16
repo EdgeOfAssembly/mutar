@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
-# star/tests/test_new_options.sh — Tests for newly implemented options in PR #170
+# tests/test_new_options.sh — Tests for newly implemented options in PR #170
 # Tests: wildcards, anchored, ignore-case, hole-detection, verify, interactive,
 #        warning, show-omitted-dirs, show-transformed-names, index-file,
 #        checkpoint-action, full-time, preserve-order, overwrite-dir,
 #        exclude-vcs-ignores, help/usage completeness
 #
-# Usage: ./test_new_options.sh [/path/to/star]
+# Usage: ./test_new_options.sh [/path/to/mutar]
 set -euo pipefail
 
-STAR="${1:-$(dirname "$0")/../build/star}"
-TMPDIR_BASE="$(mktemp -d /tmp/star_new_opts.XXXXXX)"
+MUTAR="${1:-$(dirname "$0")/../build/mutar}"
+TMPDIR_BASE="$(mktemp -d /tmp/mutar_new_opts.XXXXXX)"
 trap 'rm -rf "$TMPDIR_BASE"' EXIT
 
 PASS=0; FAIL=0; SKIP=0
@@ -35,7 +35,7 @@ echo "abc" > "$GROUND/subdir/code.c"
 # ── Help / usage completeness ─────────────────────────────────────────────────
 T "T-NO-01: --help shows all major switches" \
 bash -c "
-  HELP=\$(\"$STAR\" --help 2>&1)
+  HELP=\$(\"$MUTAR\" --help 2>&1)
   MISSING=()
   # Build the list of always-required options
   OPTS=('create' 'extract' 'list' 'append' 'update' 'delete'
@@ -63,19 +63,19 @@ bash -c "
 
 T "T-NO-02: --usage shows help" \
 bash -c "
-  USAGE=\$(\"$STAR\" --usage 2>&1 | wc -l)
+  USAGE=\$(\"$MUTAR\" --usage 2>&1 | wc -l)
   [ \"\$USAGE\" -gt 50 ] && echo '  full usage output' || echo \"  short output (\$USAGE lines)\"
   [ \"\$USAGE\" -gt 50 ] && exit 0 || exit 1
 " && pass "T-NO-02 --usage completeness" || fail "T-NO-02 --usage" "usage too short"
 
 # ── Wildcard pattern matching ──────────────────────────────────────────────────
 WARCH="$TMPDIR_BASE/wildcards.tar"
-"$STAR" -c --exclude="*.log" -f "$WARCH" -C "$TMPDIR_BASE" ground >/dev/null 2>&1
+"$MUTAR" -c --exclude="*.log" -f "$WARCH" -C "$TMPDIR_BASE" ground >/dev/null 2>&1
 
 T "T-NO-03: --wildcards (default) excludes *.log" \
 bash -c "
   ARCH=\"$WARCH\"
-  LIST=\$(\"$STAR\" -t -f \"\$ARCH\" 2>&1)
+  LIST=\$(\"$MUTAR\" -t -f \"\$ARCH\" 2>&1)
   echo \"\$LIST\" | grep -q 'file1.txt' || { echo '  FAIL: file1.txt not in archive'; exit 1; }
   echo \"\$LIST\" | grep -q 'file2.log' && { echo '  FAIL: file2.log should be excluded'; exit 1; }
   echo '  wildcard exclusion worked'
@@ -83,7 +83,7 @@ bash -c "
 
 # Case-insensitive exclusion
 WARCH2="$TMPDIR_BASE/nocase.tar"
-"$STAR" -c --exclude="*.LOG" --ignore-case -f "$WARCH2" -C "$TMPDIR_BASE" ground >/dev/null 2>&1 || true
+"$MUTAR" -c --exclude="*.LOG" --ignore-case -f "$WARCH2" -C "$TMPDIR_BASE" ground >/dev/null 2>&1 || true
 
 if [ ! -f "$WARCH2" ]; then
     skip "T-NO-04 ignore-case" "archive not created (--ignore-case may not be available)"
@@ -91,7 +91,7 @@ else
     T "T-NO-04: --ignore-case exclude" \
     bash -c "
       ARCH=\"$WARCH2\"
-      LIST=\$(\"$STAR\" -t -f \"\$ARCH\" 2>&1)
+      LIST=\$(\"$MUTAR\" -t -f \"\$ARCH\" 2>&1)
       echo \"\$LIST\" | grep -q 'file2.log' && { echo '  FAIL: file2.log should be excluded with --ignore-case'; exit 1; }
       echo '  ignore-case exclusion worked'
     " && pass "T-NO-04 ignore-case" || fail "T-NO-04 ignore-case" "case-insensitive match failed"
@@ -99,12 +99,12 @@ fi
 
 # --no-wildcards: literal match (use full path or --no-anchored)
 NWARCH="$TMPDIR_BASE/nowild.tar"
-"$STAR" -c --exclude="ground/file2.log" --no-wildcards -f "$NWARCH" -C "$TMPDIR_BASE" ground >/dev/null 2>&1
+"$MUTAR" -c --exclude="ground/file2.log" --no-wildcards -f "$NWARCH" -C "$TMPDIR_BASE" ground >/dev/null 2>&1
 
 T "T-NO-05: --no-wildcards literal exclude (full path)" \
 bash -c "
   ARCH=\"$NWARCH\"
-  LIST=\$(\"$STAR\" -t -f \"\$ARCH\" 2>&1)
+  LIST=\$(\"$MUTAR\" -t -f \"\$ARCH\" 2>&1)
   echo \"\$LIST\" | grep -q 'file2.log' && { echo '  FAIL: exact path match should exclude'; exit 1; }
   echo \"\$LIST\" | grep -q 'file1.txt' || { echo '  FAIL: file1.txt missing'; exit 1; }
   echo '  no-wildcards literal full-path exclude worked'
@@ -114,24 +114,24 @@ bash -c "
 # Since anchored defaults to false (GNU tar default), --no-anchored is the default.
 # Test: with default (no-anchored), basename-only pattern matches anywhere in path.
 AARCH_DEFAULT="$TMPDIR_BASE/anchored_default.tar"
-"$STAR" -c --exclude="nested.txt" -f "$AARCH_DEFAULT" -C "$TMPDIR_BASE" ground >/dev/null 2>&1
+"$MUTAR" -c --exclude="nested.txt" -f "$AARCH_DEFAULT" -C "$TMPDIR_BASE" ground >/dev/null 2>&1
 
 T "T-NO-06: default (--no-anchored) matches basename anywhere" \
 bash -c "
   ARCH=\"$AARCH_DEFAULT\"
-  LIST=\$(\"$STAR\" -t -f \"\$ARCH\" 2>&1)
+  LIST=\$(\"$MUTAR\" -t -f \"\$ARCH\" 2>&1)
   echo \"\$LIST\" | grep -q 'nested.txt' && { echo '  FAIL: nested.txt should be excluded by basename match (default no-anchored)'; exit 1; }
   echo '  default no-anchored: basename exclusion worked'
 " && pass "T-NO-06 no-anchored (default)" || fail "T-NO-06 no-anchored (default)" "basename match failed"
 
 # Test: with --anchored, a basename-only pattern should NOT match (needs full path match)
 AARCH_ANCHORED="$TMPDIR_BASE/anchored_on.tar"
-"$STAR" -c --exclude="nested.txt" --anchored -f "$AARCH_ANCHORED" -C "$TMPDIR_BASE" ground >/dev/null 2>&1
+"$MUTAR" -c --exclude="nested.txt" --anchored -f "$AARCH_ANCHORED" -C "$TMPDIR_BASE" ground >/dev/null 2>&1
 
 T "T-NO-06b: --anchored requires full path match" \
 bash -c "
   ARCH=\"$AARCH_ANCHORED\"
-  LIST=\$(\"$STAR\" -t -f \"\$ARCH\" 2>&1)
+  LIST=\$(\"$MUTAR\" -t -f \"\$ARCH\" 2>&1)
   # With --anchored, 'nested.txt' pattern only matches the exact path 'nested.txt',
   # not 'ground/subdir/nested.txt', so nested.txt should still be in the archive.
   echo \"\$LIST\" | grep -q 'nested.txt' \
@@ -142,12 +142,12 @@ bash -c "
 
 # ── full-time ─────────────────────────────────────────────────────────────────
 FTARCH="$TMPDIR_BASE/fulltime.tar"
-"$STAR" -c -f "$FTARCH" -C "$TMPDIR_BASE" ground >/dev/null 2>&1
+"$MUTAR" -c -f "$FTARCH" -C "$TMPDIR_BASE" ground >/dev/null 2>&1
 
 T "T-NO-07: --full-time shows more timestamp detail" \
 bash -c "
-  NORMAL=\$(\"$STAR\" -tv -f \"$FTARCH\" 2>&1 | head -5)
-  FULL=\$(\"$STAR\" -tv --full-time -f \"$FTARCH\" 2>&1 | head -5)
+  NORMAL=\$(\"$MUTAR\" -tv -f \"$FTARCH\" 2>&1 | head -5)
+  FULL=\$(\"$MUTAR\" -tv --full-time -f \"$FTARCH\" 2>&1 | head -5)
   echo \"  normal: \$NORMAL\" | head -2
   echo \"  full:   \$FULL\" | head -2
   # full-time should show nanoseconds or sub-second
@@ -159,7 +159,7 @@ bash -c "
 IDXARCH="$TMPDIR_BASE/index_test.tar"
 IDXFILE="$TMPDIR_BASE/index.txt"
 # Note: with --index-file, verbose output goes exclusively to the index file (not stdout)
-"$STAR" -c -v --index-file="$IDXFILE" -f "$IDXARCH" -C "$TMPDIR_BASE" ground 2>/dev/null
+"$MUTAR" -c -v --index-file="$IDXFILE" -f "$IDXARCH" -C "$TMPDIR_BASE" ground 2>/dev/null
 
 T "T-NO-08: --index-file routes verbose output exclusively to file" \
 bash -c "
@@ -175,7 +175,7 @@ bash -c "
 T "T-NO-09: --checkpoint (default action) prints message" \
 bash -c "
   ARCH=\"$TMPDIR_BASE/ckpt.tar\"
-  OUT=\$(\"$STAR\" -c --checkpoint=1 -f \"\$ARCH\" -C \"$TMPDIR_BASE\" ground 2>&1)
+  OUT=\$(\"$MUTAR\" -c --checkpoint=1 -f \"\$ARCH\" -C \"$TMPDIR_BASE\" ground 2>&1)
   echo \"  output: '\$OUT'\"
   echo \"\$OUT\" | grep -q 'checkpoint' || { echo '  INFO: no checkpoint message in output'; }
   [ -f \"\$ARCH\" ] && echo '  archive created OK'
@@ -184,7 +184,7 @@ bash -c "
 T "T-NO-09b: --checkpoint-action=dot prints dots" \
 bash -c "
   ARCH=\"$TMPDIR_BASE/ckpt_dot.tar\"
-  OUT=\$(\"$STAR\" -c --checkpoint=1 --checkpoint-action=dot -f \"\$ARCH\" -C \"$TMPDIR_BASE\" ground 2>&1)
+  OUT=\$(\"$MUTAR\" -c --checkpoint=1 --checkpoint-action=dot -f \"\$ARCH\" -C \"$TMPDIR_BASE\" ground 2>&1)
   echo \"  output: '\$OUT'\"
   echo \"\$OUT\" | grep -q '\.' || { echo '  INFO: no dots visible (may go to stderr separately)'; }
   [ -f \"\$ARCH\" ] && echo '  archive created OK'
@@ -193,7 +193,7 @@ bash -c "
 T "T-NO-10: --checkpoint-action=echo prints message" \
 bash -c "
   ARCH=\"$TMPDIR_BASE/ckpt2.tar\"
-  OUT=\$(\"$STAR\" -c --checkpoint=1 '--checkpoint-action=echo hello checkpoint' -f \"\$ARCH\" -C \"$TMPDIR_BASE\" ground 2>&1)
+  OUT=\$(\"$MUTAR\" -c --checkpoint=1 '--checkpoint-action=echo hello checkpoint' -f \"\$ARCH\" -C \"$TMPDIR_BASE\" ground 2>&1)
   echo \"  output contains: \$(echo \"\$OUT\" | head -2)\"
   [ -f \"\$ARCH\" ] && echo '  archive created OK'
 " && pass "T-NO-10 checkpoint echo" || fail "T-NO-10 checkpoint echo" "failed"
@@ -202,7 +202,7 @@ bash -c "
 T "T-NO-11: --verify rereads archive after create" \
 bash -c "
   ARCH=\"$TMPDIR_BASE/verify_test.tar\"
-  OUT=\$(\"$STAR\" -c -W -f \"\$ARCH\" -C \"$TMPDIR_BASE\" ground 2>&1)
+  OUT=\$(\"$MUTAR\" -c -W -f \"\$ARCH\" -C \"$TMPDIR_BASE\" ground 2>&1)
   echo \"  verify output: \$OUT\" | head -3
   echo \"\$OUT\" | grep -qi 'verify' || { echo '  INFO: no verify message in output (may be silent on success)'; }
   [ -f \"\$ARCH\" ] && echo '  archive + verify completed OK'
@@ -214,8 +214,8 @@ bash -c "
   ARCH=\"$TMPDIR_BASE/owd_test.tar\"
   EXDIR=\"$TMPDIR_BASE/owd_ex\"
   mkdir -p \"\$EXDIR\"
-  \"$STAR\" -c -f \"\$ARCH\" -C \"$TMPDIR_BASE\" ground >/dev/null 2>&1
-  \"$STAR\" -x --overwrite-dir -f \"\$ARCH\" -C \"\$EXDIR\" >/dev/null 2>&1
+  \"$MUTAR\" -c -f \"\$ARCH\" -C \"$TMPDIR_BASE\" ground >/dev/null 2>&1
+  \"$MUTAR\" -x --overwrite-dir -f \"\$ARCH\" -C \"\$EXDIR\" >/dev/null 2>&1
   [ -d \"\$EXDIR/ground\" ] && echo '  overwrite-dir extract OK' || { echo '  FAIL: dir not created'; exit 1; }
 " && pass "T-NO-12 overwrite-dir" || fail "T-NO-12 overwrite-dir" "failed"
 
@@ -229,8 +229,8 @@ echo "temporary" > "$VCSTESTDIR/project/build.tmp"
 T "T-NO-13: --exclude-vcs-ignores reads .gitignore patterns" \
 bash -c "
   ARCH=\"$TMPDIR_BASE/vcs_test.tar\"
-  \"$STAR\" -c --exclude-vcs-ignores -f \"\$ARCH\" -C \"$TMPDIR_BASE\" vcstest >/dev/null 2>&1
-  LIST=\$(\"$STAR\" -t -f \"\$ARCH\" 2>&1)
+  \"$MUTAR\" -c --exclude-vcs-ignores -f \"\$ARCH\" -C \"$TMPDIR_BASE\" vcstest >/dev/null 2>&1
+  LIST=\$(\"$MUTAR\" -t -f \"\$ARCH\" 2>&1)
   echo \"\$LIST\" | grep -q 'keep.txt' || { echo '  FAIL: keep.txt should be in archive'; exit 1; }
   echo \"\$LIST\" | grep -q 'build.tmp' && { echo '  FAIL: build.tmp should be excluded by .gitignore'; exit 1; }
   echo '  VCS ignores worked: .gitignore patterns applied'
@@ -240,7 +240,7 @@ bash -c "
 T "T-NO-14: --show-omitted-dirs prints excluded dirs" \
 bash -c "
   ARCH=\"$TMPDIR_BASE/omit_test.tar\"
-  OUT=\$(\"$STAR\" -c --exclude='subdir' --show-omitted-dirs -f \"\$ARCH\" -C \"$TMPDIR_BASE\" ground 2>&1)
+  OUT=\$(\"$MUTAR\" -c --exclude='subdir' --show-omitted-dirs -f \"\$ARCH\" -C \"$TMPDIR_BASE\" ground 2>&1)
   echo \"  output: \$OUT\" | head -3
   echo \"\$OUT\" | grep -q 'subdir' || { echo '  INFO: omitted dirs may use different format'; }
   [ -f \"\$ARCH\" ] && echo '  archive with show-omitted-dirs created OK'
@@ -250,9 +250,9 @@ bash -c "
 T "T-NO-15: -s / --preserve-order emits not-implemented warning" \
 bash -c "
   ARCH=\"$TMPDIR_BASE/order_test.tar\"
-  \"$STAR\" -c -f \"\$ARCH\" -C \"$TMPDIR_BASE\" ground >/dev/null 2>&1
+  \"$MUTAR\" -c -f \"\$ARCH\" -C \"$TMPDIR_BASE\" ground >/dev/null 2>&1
   # -s emits a warning (not yet implemented) and is otherwise accepted
-  OUT=\$(\"$STAR\" -t -s -f \"\$ARCH\" 2>&1)
+  OUT=\$(\"$MUTAR\" -t -s -f \"\$ARCH\" 2>&1)
   echo \"\$OUT\" | grep -qi 'warning\|not.*implemented\|ignored' \
     && echo '  -s emits not-implemented warning as expected' \
     || echo '  INFO: -s accepted (warning may go to stderr separately)'
@@ -268,7 +268,7 @@ echo "data" >> "$HSPARSE/sparse.bin"
 T "T-NO-16: --hole-detection=seek (sparse with seek method)" \
 bash -c "
   ARCH=\"$TMPDIR_BASE/hole_seek.tar\"
-  \"$STAR\" -c -S --hole-detection=seek -f \"\$ARCH\" -C \"$TMPDIR_BASE\" hole_sparse 2>&1
+  \"$MUTAR\" -c -S --hole-detection=seek -f \"\$ARCH\" -C \"$TMPDIR_BASE\" hole_sparse 2>&1
   ASIZE=\$(stat -c%s \"\$ARCH\" 2>/dev/null || echo 0)
   LSIZE=\$(stat -c%s \"$HSPARSE/sparse.bin\" 2>/dev/null || echo 0)
   echo \"  archive=\$ASIZE bytes, logical=\$LSIZE bytes\"
@@ -278,7 +278,7 @@ bash -c "
 T "T-NO-17: --hole-detection=raw (sparse with raw scan)" \
 bash -c "
   ARCH=\"$TMPDIR_BASE/hole_raw.tar\"
-  \"$STAR\" -c -S --hole-detection=raw -f \"\$ARCH\" -C \"$TMPDIR_BASE\" hole_sparse 2>&1
+  \"$MUTAR\" -c -S --hole-detection=raw -f \"\$ARCH\" -C \"$TMPDIR_BASE\" hole_sparse 2>&1
   [ -f \"\$ARCH\" ] && echo '  hole-detection=raw: archive created OK' || { echo '  FAIL'; exit 1; }
 " && pass "T-NO-17 hole-detection=raw" || fail "T-NO-17 hole-detection=raw" "failed"
 
@@ -288,7 +288,7 @@ bash -c "
   SNAR=\"$TMPDIR_BASE/level0.snar\"
   echo 'existing content' > \"\$SNAR\"
   ARCH=\"$TMPDIR_BASE/level0.tar\"
-  \"$STAR\" -c --level=0 -g \"\$SNAR\" -f \"\$ARCH\" -C \"$TMPDIR_BASE\" ground >/dev/null 2>&1
+  \"$MUTAR\" -c --level=0 -g \"\$SNAR\" -f \"\$ARCH\" -C \"$TMPDIR_BASE\" ground >/dev/null 2>&1
   [ -f \"\$SNAR\" ] || { echo '  FAIL: snar file not created'; exit 1; }
   # After --level=0, snapshot should be fresh (not start with 'existing content')
   ! grep -q 'existing content' \"\$SNAR\" && echo '  level=0 truncated snapshot OK' || echo '  INFO: snapshot may not have been truncated (expected for level=0)'
@@ -298,14 +298,14 @@ bash -c "
 T "T-NO-19: --warning=all accepted" \
 bash -c "
   ARCH=\"$TMPDIR_BASE/warn_test.tar\"
-  \"$STAR\" -c --warning=all -f \"\$ARCH\" -C \"$TMPDIR_BASE\" ground >/dev/null 2>&1
+  \"$MUTAR\" -c --warning=all -f \"\$ARCH\" -C \"$TMPDIR_BASE\" ground >/dev/null 2>&1
   [ -f \"\$ARCH\" ] && echo '  --warning=all accepted without error'
 " && pass "T-NO-19 warning=all" || fail "T-NO-19 warning=all" "failed"
 
 T "T-NO-20: --warning=no-timestamp accepted" \
 bash -c "
   ARCH=\"$TMPDIR_BASE/warn_test2.tar\"
-  \"$STAR\" -c --warning=no-timestamp -f \"\$ARCH\" -C \"$TMPDIR_BASE\" ground >/dev/null 2>&1
+  \"$MUTAR\" -c --warning=no-timestamp -f \"\$ARCH\" -C \"$TMPDIR_BASE\" ground >/dev/null 2>&1
   [ -f \"\$ARCH\" ] && echo '  --warning=no-timestamp accepted without error'
 " && pass "T-NO-20 warning=no-timestamp" || fail "T-NO-20 warning=no-timestamp" "failed"
 
