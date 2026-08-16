@@ -216,7 +216,7 @@ Report after each phase: changes, commands+exit codes, residual risks.
 
 - [x] Phase A: G22 path hygiene + G5 honest status tables (COMPAT/AGENTS/README)
 - [x] G1 `--pax-option` tested (`delete=KEYWORD`)
-- [ ] G2–G4 multi-volume mid-file + scripts + volno  
+- [x] G2–G4 multi-volume between-member + scripts + volno (mid-file still partial)  
 - [ ] G6–G8 xattrs/ACLs round-trip (when libs present)  
 - [ ] SELinux still unsupported in help/docs  
 - [ ] Sanitizer ctest + harnesses green  

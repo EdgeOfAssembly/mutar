@@ -931,7 +931,7 @@ static void mutar_warn(const Config& cfg, std::string_view category, std::string
                      static_cast<int>(msg.size()), msg.data());
 }
 
-// ── Multi-volume filename helper ──────────────────────────────────────────────
+// ── Multi-volume helpers ──────────────────────────────────────────────────────
 
 // Generate the archive filename for volume N (1-based).
 // If base contains "%d", substitute the volume number.
@@ -949,6 +949,88 @@ static std::string make_volume_name(const std::string& base, int vol_num) {
     }
     if (vol_num == 1) return base;
     return base + "." + std::to_string(vol_num);
+}
+
+// Read initial volume number from --volno-file (default 1).
+static int read_volno_file(const std::string& path) {
+    if (path.empty()) return 1;
+    std::ifstream in(path);
+    if (!in) return 1;
+    int v = 0;
+    in >> v;
+    if (!in || v < 1) return 1;
+    return v;
+}
+
+// Atomically write current volume number to --volno-file (mkstemp + rename).
+static bool write_volno_file(const std::string& path, int vol_num) {
+    if (path.empty()) return true;
+    std::string dir = ".";
+    auto slash = path.rfind('/');
+    if (slash != std::string::npos && slash > 0)
+        dir = path.substr(0, slash);
+    else if (slash == 0)
+        dir = "/";
+
+    std::string tmpl = dir + "/.mutar_volno_XXXXXX";
+    std::vector<char> buf(tmpl.begin(), tmpl.end());
+    buf.push_back('\0');
+    int fd = ::mkstemp(buf.data());
+    if (fd < 0) {
+        print(stderr, "mutar: cannot create temp for volno-file '{}': {}\n",
+              path, std::strerror(errno));
+        return false;
+    }
+    std::string content = std::to_string(vol_num) + "\n";
+    const char* p = content.data();
+    std::size_t left = content.size();
+    while (left > 0) {
+        ssize_t w = ::write(fd, p, left);
+        if (w < 0) {
+            if (errno == EINTR) continue;
+            print(stderr, "mutar: cannot write volno-file temp: {}\n", std::strerror(errno));
+            ::close(fd);
+            ::unlink(buf.data());
+            return false;
+        }
+        p += w;
+        left -= static_cast<std::size_t>(w);
+    }
+    ::close(fd);
+    if (::rename(buf.data(), path.c_str()) < 0) {
+        print(stderr, "mutar: cannot update volno-file '{}': {}\n",
+              path, std::strerror(errno));
+        ::unlink(buf.data());
+        return false;
+    }
+    return true;
+}
+
+// Run -F/--info-script at a volume boundary. Non-zero exit → failure.
+// Sets GNU-like TAR_ARCHIVE and TAR_VOLUME in the environment.
+static bool run_info_script(const Config& cfg, const std::string& archive_path,
+                            int vol_num, const char* subcommand) {
+    if (cfg.info_script.empty()) return true;
+    ::setenv("TAR_ARCHIVE", archive_path.c_str(), 1);
+    ::setenv("TAR_VOLUME", std::to_string(vol_num).c_str(), 1);
+    if (subcommand && subcommand[0])
+        ::setenv("TAR_SUBCOMMAND", subcommand, 1);
+    int rc = ::system(cfg.info_script.c_str());
+    if (rc != 0) {
+        int status = rc;
+        if (WIFEXITED(rc)) status = WEXITSTATUS(rc);
+        print(stderr, "mutar: info-script '{}' failed with status {}\n",
+              cfg.info_script, status);
+        return false;
+    }
+    return true;
+}
+
+// Max 512-byte blocks for --tape-length=N (N × 1024 bytes).
+static std::int64_t tape_max_blocks(const Config& cfg) {
+    if (cfg.tape_length <= 0) return 0;
+    return (static_cast<std::int64_t>(cfg.tape_length) * 1024LL)
+           / static_cast<std::int64_t>(BLOCKSIZE);
 }
 
 // ── Remote archive detection ──────────────────────────────────────────────────
@@ -1165,7 +1247,13 @@ static std::vector<SparseSegment> detect_sparse_segments(int fd, std::int64_t fi
 class ArchiveReader {
 public:
     ArchiveReader(ArchiveStream& s, int blocking, bool ignore_zeros = false)
-        : stream_(s), buf_(blocking), ignore_zeros_(ignore_zeros) {}
+        : stream_(&s), buf_(blocking), ignore_zeros_(ignore_zeros) {}
+
+    /// Switch to a new volume stream (multi-volume extract). Resets block counter.
+    void swap_stream(ArchiveStream& s) {
+        stream_ = &s;
+        buf_.reset_at_block(0);
+    }
     struct ReadResult {
         Entry entry;
         bool  ok;   // false = EOF or error
@@ -1182,14 +1270,14 @@ public:
 
         for (;;) {
             Block blk{};
-            if (!buf_.read_block(stream_, blk))
+            if (!buf_.read_block(*stream_, blk))
                 return {{}, false, true};
 
             // EOF block: two consecutive zero blocks (or single if --ignore-zeros)
             if (is_zero_block(blk)) {
                 if (ignore_zeros_) continue; // skip zero blocks, keep reading
                 Block blk2{};
-                buf_.read_block(stream_, blk2); // consume second zero block
+                buf_.read_block(*stream_, blk2); // consume second zero block
                 return {{}, false, true};
             }
 
@@ -1244,7 +1332,7 @@ public:
         std::int64_t blocks  = (to_skip + BLOCKSIZE - 1) / BLOCKSIZE;
         Block dummy{};
         for (std::int64_t i = 0; i < blocks; ++i)
-            buf_.read_block(stream_, dummy);
+            buf_.read_block(*stream_, dummy);
     }
 
     // Read entry data into a string (used for LongName, PAX headers)
@@ -1255,7 +1343,7 @@ public:
         std::string blockbuf(static_cast<std::size_t>(blocks * BLOCKSIZE), '\0');
         Block blk{};
         for (std::int64_t i = 0; i < blocks; ++i) {
-            buf_.read_block(stream_, blk);
+            buf_.read_block(*stream_, blk);
             std::memcpy(blockbuf.data() + i * BLOCKSIZE, blk.buffer, BLOCKSIZE);
         }
         result = blockbuf.substr(0, static_cast<std::size_t>(sz));
@@ -1268,7 +1356,7 @@ public:
         std::int64_t remaining = e.asize;
         Block blk{};
         while (remaining > 0) {
-            if (!buf_.read_block(stream_, blk)) return false;
+            if (!buf_.read_block(*stream_, blk)) return false;
             std::size_t chunk = static_cast<std::size_t>(
                 std::min<std::int64_t>(BLOCKSIZE, remaining));
             if (out_fd >= 0) {
@@ -1291,12 +1379,12 @@ public:
     /// Seek to an absolute byte offset in a seekable archive and reset the block buffer.
     /// @return false if the stream is not seekable or lseek fails.
     bool seek_to_byte(std::uint64_t offset) {
-        if (!stream_.is_seekable()) return false;
+        if (!stream_->is_seekable()) return false;
         if (offset % BLOCKSIZE != 0) {
             print(stderr, "mutar: index offset {} is not block-aligned\n", offset);
             return false;
         }
-        if (stream_.seek(static_cast<off_t>(offset), SEEK_SET) < 0) return false;
+        if (stream_->seek(static_cast<off_t>(offset), SEEK_SET) < 0) return false;
         buf_.reset_at_block(static_cast<std::int64_t>(offset / BLOCKSIZE));
         if (std::getenv("MUTAR_DEBUG_SEEK"))
             print(stderr, "mutar: seek_to_byte offset={}\n", offset);
@@ -1314,7 +1402,7 @@ public:
         std::int64_t arch_rem = e.asize;
         Block blk{};
         while (arch_rem > 0) {
-            if (!buf_.read_block(stream_, blk)) return false;
+            if (!buf_.read_block(*stream_, blk)) return false;
             std::size_t chunk = static_cast<std::size_t>(
                 std::min<std::int64_t>(BLOCKSIZE, arch_rem));
 
@@ -1413,7 +1501,7 @@ public:
         bool isext = g.isextended != 0;
         while (isext) {
             Block ext{};
-            buf_.read_block(stream_, ext);
+            buf_.read_block(*stream_, ext);
             const auto& sp = ext.sparse;
             for (int i = 0; i < 21; ++i) {
                 auto off = static_cast<std::int64_t>(read_octal({sp.sp[i].offset,   12}));
@@ -1429,7 +1517,7 @@ public:
         e.is_sparse = true;
     }
 
-    ArchiveStream& stream_;
+    ArchiveStream* stream_;
     BlockBuffer    buf_;
     bool           ignore_zeros_ = false;
 };
@@ -1439,9 +1527,15 @@ public:
 class ArchiveWriter {
 public:
     ArchiveWriter(ArchiveStream& s, int blocking, Format fmt)
-        : stream_(s), buf_(blocking), fmt_(fmt) {}
+        : stream_(&s), buf_(blocking), fmt_(fmt) {}
 
     ~ArchiveWriter() { /* caller must call finish() */ }
+
+    /// Switch to a new volume stream (multi-volume create). Resets block counter.
+    void swap_stream(ArchiveStream& s) {
+        stream_ = &s;
+        buf_.reset_at_block(0);
+    }
 
     // Set optional owner/group remapping maps (pointers may be null).
     void set_owner_map(const std::map<std::string,std::string>* om,
@@ -1455,9 +1549,9 @@ public:
     // Write two EOF blocks + flush
     void finish() {
         Block zero{};
-        buf_.write_block(stream_, zero);
-        buf_.write_block(stream_, zero);
-        buf_.flush(stream_);
+        buf_.write_block(*stream_, zero);
+        buf_.write_block(*stream_, zero);
+        buf_.flush(*stream_);
     }
 
     // Add a single file/dir/symlink/device/hardlink from the filesystem
@@ -1590,7 +1684,7 @@ private:
         // Override magic to GNU
         std::memcpy(hblk.header.magic, "ustar  ", 8);
         write_checksum(hblk);
-        buf_.write_block(stream_, hblk);
+        buf_.write_block(*stream_, hblk);
 
         // Write data blocks
         std::string data(longname);
@@ -1635,7 +1729,7 @@ private:
         Config tmp_cfg;
         tmp_cfg.fmt = Format::USTAR;
         Block hblk = encode_header(meta, tmp_cfg);
-        buf_.write_block(stream_, hblk);
+        buf_.write_block(*stream_, hblk);
         write_data_bytes(pax_data.data(), pax_data.size());
     }
 
@@ -1644,7 +1738,7 @@ public:
         record_index_entry(e);
         maybe_write_extensions(e, cfg);
         Block hblk = encode_header(e, cfg);
-        buf_.write_block(stream_, hblk);
+        buf_.write_block(*stream_, hblk);
         return true;
     }
 
@@ -1654,7 +1748,7 @@ public:
             Block blk{};
             std::size_t chunk = std::min(sz - offset, BLOCKSIZE);
             std::memcpy(blk.buffer, data + offset, chunk);
-            buf_.write_block(stream_, blk);
+            buf_.write_block(*stream_, blk);
             offset += BLOCKSIZE; // advance full block even if partial
         }
     }
@@ -1682,7 +1776,7 @@ private:
         record_index_entry(e);
         maybe_write_extensions(e, cfg);
         Block hblk = encode_header(e, cfg);
-        buf_.write_block(stream_, hblk);
+        buf_.write_block(*stream_, hblk);
 
         int fd = ::open(fspath.c_str(), O_RDONLY);
         if (fd < 0) {
@@ -1707,7 +1801,7 @@ private:
             if (!io_error || got > 0) {
                 Block b{};
                 std::memcpy(b.buffer, blkbuf, BLOCKSIZE);
-                buf_.write_block(stream_, b);
+                buf_.write_block(*stream_, b);
                 remaining -= got;
             }
         }
@@ -1803,14 +1897,14 @@ private:
                 Config tmp_cfg;
                 tmp_cfg.fmt = Format::USTAR;
                 Block phblk = encode_header(pax_meta, tmp_cfg);
-                buf_.write_block(stream_, phblk);
+                buf_.write_block(*stream_, phblk);
                 write_data_bytes(pax_data.data(), pax_data.size());
             }
 
             // Regular data header (size = archived bytes)
             Block hblk = encode_header(e, cfg);
             write_checksum(hblk);
-            buf_.write_block(stream_, hblk);
+            buf_.write_block(*stream_, hblk);
 
             // Write data: concatenate segment bytes into one stream, pad at end
             bool ok = true;
@@ -1824,7 +1918,7 @@ private:
                 while (remaining > 0) {
                     std::size_t space = BLOCKSIZE - buf_filled;
                     if (space == 0) {
-                        buf_.write_block(stream_, b);
+                        buf_.write_block(*stream_, b);
                         std::memset(b.buffer, 0, BLOCKSIZE);
                         buf_filled = 0;
                         space = BLOCKSIZE;
@@ -1846,14 +1940,14 @@ private:
                 if (!ok) break;
             }
             if (ok && buf_filled > 0)
-                buf_.write_block(stream_, b);
+                buf_.write_block(*stream_, b);
             // Pad remaining blocks to fill the full logical block count
             std::int64_t full_blocks  = arch_size / static_cast<std::int64_t>(BLOCKSIZE);
             std::int64_t total_blocks = (arch_size + static_cast<std::int64_t>(BLOCKSIZE) - 1)
                                         / static_cast<std::int64_t>(BLOCKSIZE);
             std::int64_t written_blocks = full_blocks + (buf_filled > 0 ? 1 : 0);
             for (std::int64_t pi = written_blocks; pi < total_blocks; ++pi) {
-                Block zb{}; buf_.write_block(stream_, zb);
+                Block zb{}; buf_.write_block(*stream_, zb);
             }
 
             ::close(fd);
@@ -1895,7 +1989,7 @@ private:
             write_octal(hblk.oldgnu.sp[n_inline].numbytes, 12, 0);
         }
         write_checksum(hblk);
-        buf_.write_block(stream_, hblk);
+        buf_.write_block(*stream_, hblk);
 
         // Write extension sparse header blocks (21 entries each)
         while (seg_idx < segs.size()) {
@@ -1912,7 +2006,7 @@ private:
                 write_octal(ext.sparse.sp[n_ext].offset,   12, static_cast<std::uint64_t>(logical_size));
                 write_octal(ext.sparse.sp[n_ext].numbytes, 12, 0);
             }
-            buf_.write_block(stream_, ext);
+            buf_.write_block(*stream_, ext);
         }
 
         // Write data: concatenate segment bytes into one logical stream;
@@ -1928,7 +2022,7 @@ private:
             while (remaining > 0) {
                 std::size_t space = BLOCKSIZE - buf_filled;
                 if (space == 0) {
-                    buf_.write_block(stream_, b);
+                    buf_.write_block(*stream_, b);
                     std::memset(b.buffer, 0, BLOCKSIZE);
                     buf_filled = 0;
                     space = BLOCKSIZE;
@@ -1947,7 +2041,7 @@ private:
                 buf_filled += static_cast<std::size_t>(got);
                 remaining  -= static_cast<std::int64_t>(got);
                 if (buf_filled == BLOCKSIZE) {
-                    buf_.write_block(stream_, b);
+                    buf_.write_block(*stream_, b);
                     std::memset(b.buffer, 0, BLOCKSIZE);
                     buf_filled = 0;
                 }
@@ -1957,7 +2051,7 @@ private:
 
         // Flush the last (potentially partial) block, padded with zeros, once.
         if (ok && buf_filled > 0) {
-            buf_.write_block(stream_, b);
+            buf_.write_block(*stream_, b);
         }
         ::close(fd);
 
@@ -1975,10 +2069,10 @@ private:
         Block zero{};
         std::int64_t blocks = (sz + BLOCKSIZE - 1) / BLOCKSIZE;
         for (std::int64_t i = 0; i < blocks; ++i)
-            buf_.write_block(stream_, zero);
+            buf_.write_block(*stream_, zero);
     }
 
-    ArchiveStream& stream_;
+    ArchiveStream* stream_;
     BlockBuffer    buf_;
     Format         fmt_;
     const std::map<std::string,std::string>* owner_map_ = nullptr;
@@ -2566,12 +2660,26 @@ static int op_list(const Config& cfg) {
 // ── create (-c) ───────────────────────────────────────────────────────────────
 
 static int op_create(const Config& cfg) {
-    auto res = ArchiveStream::open_write(cfg);
+    // Multi-volume: starting volume number from --volno-file (default 1)
+    int vol_num = 1;
+    if (cfg.multi_volume && !cfg.volno_file.empty())
+        vol_num = read_volno_file(cfg.volno_file);
+
+    Config vol_cfg = cfg;
+    if (cfg.multi_volume)
+        vol_cfg.archive_file = make_volume_name(cfg.archive_file, vol_num);
+
+    auto res = ArchiveStream::open_write(vol_cfg);
     if (!res) {
         print(stderr, "mutar: {}\n", res.error().message);
         return EXIT_FAILURE;
     }
-    ArchiveStream& s = *res;
+    ArchiveStream s = std::move(*res);
+
+    if (cfg.multi_volume && !cfg.volno_file.empty()) {
+        if (!write_volno_file(cfg.volno_file, vol_num))
+            return EXIT_FAILURE;
+    }
 
     if (!cfg.index_file.empty()) {
         g_index_fp = std::fopen(cfg.index_file.c_str(), "w");
@@ -2658,9 +2766,6 @@ static int op_create(const Config& cfg) {
     // Collect entries for snapshot write/update
     std::vector<std::pair<std::string, std::int64_t>> snapshot_entries;
 
-    // Multi-volume state
-    int vol_num = 1;
-
     // Change directory if requested
     if (!cfg.directory.empty()) {
         if (::chdir(cfg.directory.c_str()) < 0) {
@@ -2673,6 +2778,43 @@ static int op_create(const Config& cfg) {
     std::int64_t total_bytes = 0;
     std::int64_t checkpoint_count = 0;
     std::vector<std::string> files_to_remove; // for --remove-files
+    const std::int64_t max_blocks = tape_max_blocks(cfg);
+    const bool do_multivol = cfg.multi_volume && max_blocks > 0;
+
+    // Finish current volume, run info-script, open next volume, swap writer stream.
+    auto rotate_volume = [&]() -> bool {
+        writer.finish();
+        total_bytes += writer.block_no() * static_cast<std::int64_t>(BLOCKSIZE);
+        std::string finished_path = vol_cfg.archive_file;
+        s.close();
+
+        if (!run_info_script(cfg, finished_path, vol_num, "-c")) {
+            exit_code = EXIT_FAILURE;
+            return false;
+        }
+
+        ++vol_num;
+        if (!cfg.volno_file.empty()) {
+            if (!write_volno_file(cfg.volno_file, vol_num)) {
+                exit_code = EXIT_FAILURE;
+                return false;
+            }
+        }
+
+        vol_cfg.archive_file = make_volume_name(cfg.archive_file, vol_num);
+        print(stderr, "mutar: writing volume #{} to {}\n", vol_num, vol_cfg.archive_file);
+
+        auto next = ArchiveStream::open_write(vol_cfg);
+        if (!next) {
+            print(stderr, "mutar: cannot open volume {}: {}\n",
+                  vol_cfg.archive_file, next.error().message);
+            exit_code = EXIT_FAILURE;
+            return false;
+        }
+        s = std::move(*next);
+        writer.swap_stream(s);
+        return true;
+    };
 
     auto add_file = [&](const std::string& raw_archname, const std::string& fspath) {
         // Apply --newer filter (skip files not newer than cutoff)
@@ -2751,42 +2893,41 @@ static int op_create(const Config& cfg) {
                                               static_cast<std::int64_t>(snap_st.st_mtime));
         }
 
+        // Multi-volume: refuse members larger than tape length (no mid-file split).
+        // Pre-rotate when the next member will not fit on the current volume.
+        if (do_multivol) {
+            struct stat mst{};
+            if (::lstat(fspath.c_str(), &mst) == 0 && S_ISREG(mst.st_mode)) {
+                const std::int64_t max_bytes =
+                    static_cast<std::int64_t>(cfg.tape_length) * 1024LL;
+                const std::int64_t data_blocks =
+                    (mst.st_size + static_cast<std::int64_t>(BLOCKSIZE) - 1)
+                    / static_cast<std::int64_t>(BLOCKSIZE);
+                const std::int64_t need_blocks = 1 + data_blocks;
+                const std::int64_t need_bytes =
+                    need_blocks * static_cast<std::int64_t>(BLOCKSIZE);
+                if (need_bytes > max_bytes) {
+                    print(stderr,
+                          "mutar: {}: file larger than tape length ({} KiB); "
+                          "mid-file multi-volume split is not supported\n",
+                          fspath, cfg.tape_length);
+                    exit_code = EXIT_FAILURE;
+                    return;
+                }
+                if (writer.block_no() > 0 &&
+                    writer.block_no() + need_blocks + 2 > max_blocks) {
+                    if (!rotate_volume()) return;
+                }
+            } else if (writer.block_no() > 0 &&
+                       writer.block_no() + 3 > max_blocks) {
+                if (!rotate_volume()) return;
+            }
+        }
+
         if (!writer.add_path(archname, fspath, cfg))
             exit_code = EXIT_FAILURE;
         else if (cfg.remove_files)
             files_to_remove.push_back(fspath);
-
-        // Multi-volume rotation: if tape_length exceeded, prompt for next volume
-        if (cfg.multi_volume && cfg.tape_length > 0) {
-            std::int64_t max_blocks = (cfg.tape_length * 1024LL)
-                                      / static_cast<std::int64_t>(BLOCKSIZE);
-            if (writer.block_no() >= max_blocks) {
-                writer.finish();
-                s.close();
-                ++vol_num;
-                std::string next_vol = make_volume_name(cfg.archive_file, vol_num);
-                print(stderr, "mutar: Prepare volume #{} ({}) and press return: ",
-                      vol_num, next_vol);
-                std::fflush(stderr);
-                FILE* tty = std::fopen("/dev/tty", "r");
-                if (!tty) tty = stdin;
-                char dummy_line[256];
-                if (!std::fgets(dummy_line, sizeof(dummy_line), tty))
-                    print(stderr, "mutar: multi-volume: prompt read failed; continuing\n");
-                if (tty != stdin) std::fclose(tty);
-                // NOTE: Full multi-volume continuation requires ArchiveWriter stream
-                // swap which is not yet implemented. This prompt + accounting is the
-                // MVP. TODO: implement ArchiveWriter::swap_stream() for full support.
-                print(stderr, "mutar: warning: multi-volume stream swap not yet implemented;"
-                      " continuing on current volume\n");
-                // Reopen the original stream to allow finish() to be called again
-                Config reopen_cfg = cfg;
-                auto rres = ArchiveStream::open_write(reopen_cfg);
-                if (!rres) { exit_code = EXIT_FAILURE; return; }
-                // Can't swap writer's stream without refactoring; just warn and continue
-                (void)rres;
-            }
-        }
 
         // --checkpoint progress
         if (cfg.checkpoint > 0) {
@@ -2804,8 +2945,13 @@ static int op_create(const Config& cfg) {
     }
 
     writer.finish();
-    total_bytes = writer.block_no() * static_cast<std::int64_t>(BLOCKSIZE);
+    total_bytes += writer.block_no() * static_cast<std::int64_t>(BLOCKSIZE);
     s.close();
+
+    if (cfg.multi_volume && !cfg.volno_file.empty()) {
+        if (!write_volno_file(cfg.volno_file, vol_num))
+            exit_code = EXIT_FAILURE;
+    }
 
     // Write sidecar index (MUTAR.INDEX.V1) after archive is complete
     if (collect_index && exit_code == EXIT_SUCCESS) {
@@ -3022,6 +3168,9 @@ static int op_extract(const Config& cfg) {
     std::int64_t checkpoint_count = 0;
     std::map<std::string, int> occurrence_map;
     int extract_vol_num = 1;
+    if (cfg.multi_volume && !cfg.volno_file.empty())
+        extract_vol_num = read_volno_file(cfg.volno_file);
+
 
     // Seek-based selective extract when index + seekable stream + named members.
     std::vector<IndexEntry> seek_queue;
@@ -3062,23 +3211,34 @@ static int op_extract(const Config& cfg) {
         auto [e, ok, eof] = reader.next_entry();
         if (eof) {
             if (use_index_seek) break; // done with seek queue
-            // Multi-volume: on EOF, prompt for next volume
+            // Multi-volume: on EOF, open next volume and continue
             if (cfg.multi_volume) {
-                ++extract_vol_num;
-                std::string next_vol = make_volume_name(cfg.archive_file, extract_vol_num);
-                print(stderr, "mutar: Prepare volume #{} ({}) and press return: ",
-                      extract_vol_num, next_vol);
-                std::fflush(stderr);
-                FILE* tty = std::fopen("/dev/tty", "r");
-                if (!tty) tty = stdin;
-                char dummy_vol[256];
-                if (!std::fgets(dummy_vol, sizeof(dummy_vol), tty)) {
-                    print(stderr, "mutar: multi-volume: prompt read failed (EOF or error); stopping\n");
-                    if (tty != stdin) std::fclose(tty);
+                std::string cur_vol = make_volume_name(cfg.archive_file, extract_vol_num);
+                if (!run_info_script(cfg, cur_vol, extract_vol_num, "-x")) {
+                    exit_code = EXIT_FAILURE;
                     break;
                 }
-                if (tty != stdin) std::fclose(tty);
-                // Try to open next volume
+                ++extract_vol_num;
+                if (!cfg.volno_file.empty())
+                    write_volno_file(cfg.volno_file, extract_vol_num);
+
+                std::string next_vol = make_volume_name(cfg.archive_file, extract_vol_num);
+                // Auto-open when the next volume file exists; otherwise prompt once.
+                if (::access(next_vol.c_str(), R_OK) != 0) {
+                    print(stderr, "mutar: Prepare volume #{} ({}) and press return: ",
+                          extract_vol_num, next_vol);
+                    std::fflush(stderr);
+                    FILE* tty = std::fopen("/dev/tty", "r");
+                    if (!tty) tty = stdin;
+                    char dummy_vol[256];
+                    if (!std::fgets(dummy_vol, sizeof(dummy_vol), tty)) {
+                        print(stderr, "mutar: multi-volume: no more volumes (EOF)\n");
+                        if (tty != stdin) std::fclose(tty);
+                        break;
+                    }
+                    if (tty != stdin) std::fclose(tty);
+                }
+
                 Config next_cfg = cfg;
                 next_cfg.archive_file = next_vol;
                 auto next_res = ArchiveStream::open_read(next_cfg);
@@ -3087,12 +3247,12 @@ static int op_extract(const Config& cfg) {
                           next_vol, next_res.error().message);
                     break;
                 }
-                // NOTE: full multi-volume extraction would require swapping
-                // the reader's stream. This MVP just ends after one volume.
-                // TODO: implement ArchiveReader::swap_stream() for full support.
-                print(stderr, "mutar: warning: multi-volume stream swap not yet fully"
-                      " implemented; stopping after volume {}\n", extract_vol_num - 1);
-                break;
+                print(stderr, "mutar: reading volume #{} from {}\n",
+                      extract_vol_num, next_vol);
+                s.close();
+                s = std::move(*next_res);
+                reader.swap_stream(s);
+                continue;
             }
             break;
         }
@@ -4201,8 +4361,24 @@ static Config parse_args(int argc, char* argv[]) {
         case 'i': cfg.ignore_zeros      = true; break;
         case 'B': cfg.read_full_records  = true; break;
         case 'M': cfg.multi_volume      = true; break;
-        case 'L': cfg.tape_length_str   = ::optarg; break;
-        case 'F': cfg.info_script       = ::optarg; break;
+        case 'L': {
+            // -L / --tape-length=N : N × 1024 bytes per volume (implies -M)
+            char* endp = nullptr; errno = 0;
+            long long val = std::strtoll(::optarg, &endp, 10);
+            if (errno != 0 || endp == ::optarg || *endp != '\0' || val <= 0 ||
+                val > static_cast<long long>(std::numeric_limits<std::int64_t>::max() / 1024)) {
+                print(stderr, "mutar: invalid tape-length '{}'\n", ::optarg);
+                std::exit(EXIT_FAILURE);
+            }
+            cfg.tape_length = static_cast<long>(val);
+            cfg.tape_length_str = ::optarg;
+            cfg.multi_volume = true;
+            break;
+        }
+        case 'F':
+            cfg.info_script = ::optarg;
+            cfg.multi_volume = true; // -F implies -M
+            break;
         case 'h': cfg.dereference       = true; break;
         case 'l': cfg.check_links = true; break;
         case 'n': cfg.seek              = true; break;
@@ -4382,10 +4558,9 @@ static Config parse_args(int argc, char* argv[]) {
         }
 
         // Accepted but no-op for now (complex features not yet implemented)
-        case OPT_VOLNO_FILE:
         case OPT_IGNORE_CMD_ERR:
         case OPT_NO_IGNORE_CMD_ERR:
-        case OPT_INFO_SCRIPT:
+        case OPT_INFO_SCRIPT: // longopt maps to 'F'
         case OPT_CHECK_DEVICE:
         case OPT_NO_CHECK_DEVICE:
         case OPT_NO_SAME_ATTR:
@@ -4393,21 +4568,24 @@ static Config parse_args(int argc, char* argv[]) {
         case OPT_AFTER_DATE:
             break;
 
+        case OPT_VOLNO_FILE:
+            cfg.volno_file = ::optarg ? ::optarg : "";
+            break;
+
         case OPT_OWNER_MAP: cfg.owner_map_file = ::optarg; break;
         case OPT_GROUP_MAP: cfg.group_map_file = ::optarg; break;
         case OPT_TAPE_LENGTH: {
+            // Dead if longopt maps to 'L'; keep as alias for safety
             char* endp = nullptr; errno = 0;
             long long val = std::strtoll(::optarg, &endp, 10);
-            // Reject zero/negative, parsing errors, and values that overflow int64_t
-            // (tape_length is stored as std::int64_t; the division by 1024 makes any
-            //  value > INT64_MAX/1024 absurd in practice).
             if (errno != 0 || endp == ::optarg || *endp != '\0' || val <= 0 ||
                 val > static_cast<long long>(std::numeric_limits<std::int64_t>::max() / 1024)) {
                 print(stderr, "mutar: invalid tape-length '{}'\n", ::optarg);
                 std::exit(EXIT_FAILURE);
             }
-            cfg.tape_length = static_cast<std::int64_t>(val);
+            cfg.tape_length = static_cast<long>(val);
             cfg.tape_length_str = ::optarg;
+            cfg.multi_volume = true;
             break;
         }
 
@@ -4670,12 +4848,15 @@ static void print_usage(const char* prog) {
         "\nDevice selection and switching:\n"
         "  -f, --file=ARCHIVE              Use archive file or device ARCHIVE\n"
         "      --force-local               Archive file is local even if it has a colon\n"
-        "  -F, --info-script=NAME, --new-volume-script=NAME  Run script at end of each tape (implies -M)\n"
-        "  -L, --tape-length=NUMBER        Change tape after writing NUMBER x 1024 bytes\n"
+        "  -F, --info-script=NAME, --new-volume-script=NAME\n"
+        "                                  Run script at end of each volume (implies -M);\n"
+        "                                  sets TAR_ARCHIVE, TAR_VOLUME; non-zero exit fails\n"
+        "  -L, --tape-length=NUMBER        Change volume after NUMBER x 1024 bytes (implies -M);\n"
+        "                                  between-member rotation only (no mid-file split)\n"
         "  -M, --multi-volume              Create/list/extract multi-volume archive\n"
         "      --rmt-command=COMMAND       Use given rmt COMMAND instead of rmt\n"
         "      --rsh-command=COMMAND       Use remote COMMAND instead of rsh\n"
-        "      --volno-file=F              Use/update the volume number in F\n"
+        "      --volno-file=F              Read/write current volume number in F (atomic)\n"
         "\nDevice blocking:\n"
         "  -b, --blocking-factor=BLOCKS    BLOCKS x 512 bytes per record\n"
         "  -B, --read-full-records         Reblock as we read (for 4.2BSD pipes)\n"

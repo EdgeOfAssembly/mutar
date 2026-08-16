@@ -127,16 +127,14 @@ For any PR changing mutar behavior:
 See `COMPATIBILITY_PROGRESS.md` for the full option audit. Short list matching code truth:
 
 **True no-ops / broken parse:**
-- `--pax-option` — partial: `delete=KEYWORD` only (other keywords ignored)
-- `--volno-file` — field exists but never assigned from CLI
 - `--check-device` / `--no-check-device` — pure discard; no Config field
 - `--quoting-style` — stored, never used for list/verbose output
 - `--restrict` — stored (`restrict_opt`), not enforced
 - SELinux (`--selinux` / `--no-selinux`) — policy-unsupported no-op + warning
 
 **Partial (do not claim complete):**
-- Multi-volume (`-M`): naming/prompts exist; rotation dead without numeric `tape_length` (CLI only stores string via `-L`)
-- `--info-script` / `--new-volume-script` — stored, never executed
+- Multi-volume (`-M -L`): between-member create/extract + stream swap; mid-file split not supported
+- `--pax-option` — `delete=KEYWORD` only (other keywords ignored)
 - `--xattrs` / `--acls` (and include/exclude) — flags only; no store/restore
 - `--backup` / `--suffix` — simple suffix rename works; numbered/existing CONTROL not implemented
 - `-s` / `--preserve-order` — accepted with not-implemented warning

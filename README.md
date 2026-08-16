@@ -199,15 +199,15 @@ Magic-byte auto-detection works on read even without `-a`.
 | Option | Status | Notes |
 |--------|--------|-------|
 | `--pax-option` | ⚠️ Partial | `delete=KEYWORD` applied on write; other keywords accepted silently |
-| `--volno-file` | ❌ No-op | Field exists but never assigned from CLI; no volume-number I/O |
+| `--volno-file` | ✅ | Atomic read/write of current volume number |
 | `--check-device` / `--no-check-device` | ❌ No-op | Pure parse discard; no Config field |
-| `--info-script` / `--new-volume-script` | ⚠️ Partial | Stored; not executed at volume boundaries |
+| `--info-script` / `--new-volume-script` | ✅ | Exec'd at volume boundary; TAR_ARCHIVE/TAR_VOLUME; non-zero fails |
 | `--restrict` | ⚠️ Partial | Stored (`restrict_opt`); restrictions not enforced |
 | `--quoting-style` | ⚠️ Partial | Stored; list/verbose output never consults style |
 | `--xattrs` / `--acls` | ⚠️ Partial | Flags accepted when built; store/restore not implemented |
 | `--selinux` / `--no-selinux` | ❌ Unsupported | Policy: no-op + warning (no test hardware) |
 | `-G -g --listed-incremental` | ⚠️ Partial | Level-0 snapshot + level≥1 mtime skip for regular files; dirs/specials always archived |
-| `--multi-volume -M -L -F` | ⚠️ Partial | Naming/prompts exist; `-L` only stores string so rotation never fires; no stream swap / mid-file split |
+| `--multi-volume -M -L` | ⚠️ Partial | Between-member rotation + extract stream swap; mid-file split not supported |
 | `--rsh-command --rmt-command` | ⚠️ Partial | rmt O/R/W/C bridge via rsh; lseek/append not supported |
 | `--backup --suffix` | ⚠️ Partial | Simple suffix rename on extract overwrite works; numbered/existing CONTROL not implemented |
 | `-s / --preserve-order` | ⚠️ Partial | Accepted (emits warning); not yet wired into traversal |
@@ -223,9 +223,8 @@ Magic-byte auto-detection works on read even without `-a`.
 | xattrs / ACLs | Flags only; no store/restore (SELinux unsupported by policy) |
 | Incremental backups (`-G -g`) | Snapshot works for regular-file mtime; dirs/specials always archived |
 | Remote tape (`--rsh/rmt-command`) | Bridge works; lseek over rmt / remote append not implemented |
-| Multi-volume archives (`-M`) | Fix `-L` numeric parse; stream swap; mid-file continuation |
+| Multi-volume mid-file split | Between-member works; single file > tape length errors (no GNUTYPE_MULTIVOL) |
 | `--pax-option` keyword processing | `delete=KEYWORD` only; full GNU set not implemented |
-| `--volno-file` / `--info-script` | volno never assigned; info-script never exec'd |
 | `--backup` CONTROL | Simple suffix only; numbered/existing not implemented |
 
 ---

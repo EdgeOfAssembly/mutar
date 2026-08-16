@@ -205,6 +205,13 @@ add_test(
   WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
 )
 
+# Multi-volume -M -L --volno-file -F (GOAL_NEXT Phase C / G2–G4)
+add_test(
+  NAME mutar_multi_volume_tests
+  COMMAND bash ${CMAKE_SOURCE_DIR}/tests/test_multi_volume.sh $<TARGET_FILE:mutar>
+  WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+)
+
 # Boundary / overflow / memory tests binary
 # Compiled with AddressSanitizer + UndefinedBehaviorSanitizer so any OOB
 # access, integer overflow, use-after-free, etc. are caught at runtime.

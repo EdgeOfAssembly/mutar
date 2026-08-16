@@ -209,10 +209,10 @@ Legend:
 
 | Option | Status | Notes |
 |--------|--------|-------|
-| `-M` / `--multi-volume` | ⚠️ | Partial: `make_volume_name` + TTY prompts exist; rotation requires `tape_length > 0` (never set via CLI); no stream swap; no mid-file split |
-| `-L` / `--tape-length=N` | ⚠️ | Broken parse: only `tape_length_str` stored; numeric `cfg.tape_length` never set via CLI (`OPT_TAPE_LENGTH` unreachable), so multi-vol rotation never fires |
-| `-F` / `--info-script=CMD` / `--new-volume-script=CMD` | ⚠️ | Stored in `info_script`; never executed |
-| `--volno-file=FILE` | ❌ | No-op: `Config::volno_file` exists but CLI never assigns it; no vol-number I/O |
+| `-M` / `--multi-volume` | ⚠️ | Between-member create/extract with stream swap; mid-file split not supported |
+| `-L` / `--tape-length=N` | ✅ | Parsed into `cfg.tape_length` (KiB); implies `-M`; pre-rotates when next member won't fit |
+| `-F` / `--info-script=CMD` / `--new-volume-script=CMD` | ✅ | Exec'd at volume boundary; `TAR_ARCHIVE`/`TAR_VOLUME` set; non-zero exit fails create; implies `-M` |
+| `--volno-file=FILE` | ✅ | Read at start; atomic write (mkstemp+rename) after each rotation and at end |
 
 ### Remote Archives
 
@@ -445,19 +445,20 @@ to include all new/modified entries.
 **Limitation**: only regular files are compared by mtime. Directories,
 symlinks, and special files are always archived on level≥1.
 
-### 4. Multi-volume support (`-M --tape-length=N`) — partial / broken CLI
+### 4. Multi-volume support (`-M --tape-length=N`) — between-member (GOAL_NEXT Phase C)
 
-`make_volume_name()` generates filenames using `%d` substitution or `.N`
-suffix. Create-side rotation is gated on `cfg.multi_volume && cfg.tape_length > 0`,
-but `-L` / `--tape-length` only store `tape_length_str` — numeric `cfg.tape_length`
-is never set from the CLI (`OPT_TAPE_LENGTH` case is unreachable). Result: rotation
-prompts never fire via normal flags. Even if `tape_length` were set, after the
-prompt the code warns and continues on the same volume (no `ArchiveWriter` stream
-swap; no mid-file split). Extract `-M` prompts on EOF then breaks without swapping
-the reader stream.
+`-L` / `--tape-length=N` parses into `cfg.tape_length` (N × 1024 bytes) and
+implies `-M`. `make_volume_name()` uses `%d` or `.N` suffixes. On create,
+before each member, if the estimated size will not fit on the current volume,
+`rotate_volume()` finishes the volume (EOF blocks), runs `--info-script` (with
+`TAR_ARCHIVE` / `TAR_VOLUME`), writes `--volno-file` atomically, opens the next
+volume path, and `ArchiveWriter::swap_stream()` continues. Extract on EOF
+auto-opens the next volume file when present and `ArchiveReader::swap_stream()`
+continues.
 
-`--volno-file` is a pure no-op (field never assigned). `--info-script` is stored
-but never executed.
+**Limitation (⚠️ Partial for G2 mid-file):** a single member larger than the tape
+length is rejected with a clear error — mid-file split (`GNUTYPE_MULTIVOL` 'M')
+is not implemented. Tests: `tests/test_multi_volume.sh`.
 
 ### 5. Remote tape / rmt (`--rsh-command` / `--rmt-command`)
 
@@ -519,19 +520,19 @@ compatibility.
 | Feature | Config field(s) | Gap |
 |---------|----------------|-----|
 | `--pax-option` | `pax_options`, `pax_option_rules` | ⚠️ Partial: `delete=KEYWORD` (repeatable / comma-list) suppresses that keyword in `write_pax_header` and sparse PAX emission; other keywords ignored |
-| `--volno-file` | `volno_file` | ❌ No-op: field never assigned from CLI; no volume-number read/write |
+| `--volno-file` | `volno_file` | ✅ Phase C: CLI assigns; atomic read/write of current volume number |
 | `--owner-map` / `--group-map` | `owner_map_file`, `group_map_file` | ✅ PR #172: fully implemented; maps uname/gname/uid/gid at create time |
-| `--info-script` / `--new-volume-script` | `info_script` | ⚠️ Stored; not exec'd at multi-volume boundaries |
+| `--info-script` / `--new-volume-script` | `info_script` | ✅ Phase C: exec'd at volume boundary; non-zero fails; TAR_* env |
 | `--check-device` / `--no-check-device` | *(none)* | ❌ No-op: pure parse discard; no Config field; incremental compares mtime only |
 | `--restrict` | `restrict_opt` | ⚠️ Stored; no privilege restrictions enforced |
 | `--quoting-style` | `quoting_style` | ⚠️ Stored; list/verbose output never consults style |
 | `--backup` / `--suffix` | `backup`, `backup_control`, `backup_suffix` | ⚠️ Simple suffix rename on extract works; numbered/existing CONTROL not implemented |
 | `--sparse-version` | `sparse_version` | ⚠️ String stored; `sparse_major`/`sparse_minor` never parsed; write hardcodes 1.0 |
-| `-L` / `--tape-length` | `tape_length_str`, `tape_length` | ⚠️ Only string stored via CLI; numeric `tape_length` never set so rotation never fires |
+| `-L` / `--tape-length` | `tape_length_str`, `tape_length` | ✅ Phase C: numeric parse into `tape_length`; implies `-M` |
 | `--xattrs` / `--acls` | `xattrs`, `acls` | Build-time detection; flags accepted; **store/restore not yet implemented** (GOAL_NEXT G6–G8) |
 | `--selinux` / `--no-selinux` | `selinux` | **Unsupported by policy** (no test hardware); accepted as no-op with warning |
 | `-G` / `-g` (incremental) | `listed_incremental` | ✅ PR #172: snapshot written at level-0; level≥1 skips unchanged files. Limitation: only regular files compared by mtime. |
-| `-M` (multi-volume) | `multi_volume` | ⚠️ Prompts/naming exist; rotation dead without CLI `tape_length`; no stream swap; no mid-file split |
+| `-M` (multi-volume) | `multi_volume` | ⚠️ Phase C: between-member stream swap create+extract; **mid-file split still TODO** |
 | `--rsh-command` / `--rmt-command` | `rsh_command`, `rmt_command` | 🔧 PR #172: rmt bridge via rsh fork+pipe; O/R/W/C protocol implemented. Limitation: lseek over rmt not implemented |
 | PAX sparse write format | `fmt_` | ✅ PR #172: when `--format=pax`, GNU.sparse.* PAX keywords emitted; GNU.sparse.map parsed on read |
 | `--warning=KEYWORD` | `warnings_enabled/disabled` | ✅ PR #172: `mutar_warn()` helper implemented and wired at key emission sites |
