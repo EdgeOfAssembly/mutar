@@ -198,7 +198,7 @@ Magic-byte auto-detection works on read even without `-a`.
 
 | Option | Status | Notes |
 |--------|--------|-------|
-| `--pax-option` | ❌ No-op | Parsed and discarded; no Config field; PAX headers always emit fixed keywords |
+| `--pax-option` | ⚠️ Partial | `delete=KEYWORD` applied on write; other keywords accepted silently |
 | `--volno-file` | ❌ No-op | Field exists but never assigned from CLI; no volume-number I/O |
 | `--check-device` / `--no-check-device` | ❌ No-op | Pure parse discard; no Config field |
 | `--info-script` / `--new-volume-script` | ⚠️ Partial | Stored; not executed at volume boundaries |
@@ -224,7 +224,7 @@ Magic-byte auto-detection works on read even without `-a`.
 | Incremental backups (`-G -g`) | Snapshot works for regular-file mtime; dirs/specials always archived |
 | Remote tape (`--rsh/rmt-command`) | Bridge works; lseek over rmt / remote append not implemented |
 | Multi-volume archives (`-M`) | Fix `-L` numeric parse; stream swap; mid-file continuation |
-| `--pax-option` keyword processing | Pure no-op today; needs Config field + apply in `write_pax_header` |
+| `--pax-option` keyword processing | `delete=KEYWORD` only; full GNU set not implemented |
 | `--volno-file` / `--info-script` | volno never assigned; info-script never exec'd |
 | `--backup` CONTROL | Simple suffix only; numbered/existing not implemented |
 

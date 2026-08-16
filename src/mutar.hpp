@@ -178,6 +178,12 @@ enum class Compress {
 
 // ── Config: parsed CLI options ────────────────────────────────────────────────
 
+/// Parsed --pax-option rules applied when writing PAX extended headers.
+/// MVP: only `delete=KEYWORD` (suppress emission of that keyword).
+struct PaxOptionRules {
+    std::set<std::string> delete_keywords;  // delete=keyword
+};
+
 struct Config {
     Operation   op            = Operation::None;
     Format      fmt           = Format::Default;
@@ -211,6 +217,8 @@ struct Config {
     std::string hole_detection;          // --hole-detection
     std::string mode_str;                // --mode
     std::string record_size_str;         // --record-size
+    std::vector<std::string> pax_options; // raw --pax-option=... (repeatable)
+    PaxOptionRules pax_option_rules;     // parsed delete=KEYWORD set
 
     // Booleans — defaults match GNU tar behaviour
     bool verbose             = false;

@@ -62,7 +62,7 @@ Every PR for mutar must include a status table like this:
 |--------|--------|-------|
 | `-c`, `--create` | ✅ Implemented | Full parity with tar.1 |
 | `-S`, `--sparse` | ⚠️ Partial | Sparse write/extract works; `--hole-detection` wired; `--sparse-version` string-only (always emit 1.0) |
-| `--pax-option` | ❌ No-op | Parsed and discarded; no Config field |
+| `--pax-option` | ⚠️ Partial | `delete=KEYWORD` applied on write; other keywords not yet |
 | `--verify` | ✅ Implemented | Post-create re-read verification |
 
 Status key:
@@ -127,7 +127,7 @@ For any PR changing mutar behavior:
 See `COMPATIBILITY_PROGRESS.md` for the full option audit. Short list matching code truth:
 
 **True no-ops / broken parse:**
-- `--pax-option` — parsed, discarded; no Config field
+- `--pax-option` — partial: `delete=KEYWORD` only (other keywords ignored)
 - `--volno-file` — field exists but never assigned from CLI
 - `--check-device` / `--no-check-device` — pure discard; no Config field
 - `--quoting-style` — stored, never used for list/verbose output

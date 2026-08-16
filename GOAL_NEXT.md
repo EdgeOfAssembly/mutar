@@ -215,7 +215,7 @@ Report after each phase: changes, commands+exit codes, residual risks.
 ## 9. Success metrics (checklist)
 
 - [x] Phase A: G22 path hygiene + G5 honest status tables (COMPAT/AGENTS/README)
-- [ ] G1 `--pax-option` tested  
+- [x] G1 `--pax-option` tested (`delete=KEYWORD`)
 - [ ] G2–G4 multi-volume mid-file + scripts + volno  
 - [ ] G6–G8 xattrs/ACLs round-trip (when libs present)  
 - [ ] SELinux still unsupported in help/docs  

@@ -83,7 +83,7 @@ Legend:
 | `-H` / `--format=FORMAT` | ✅ | v7, oldgnu, gnu, ustar, pax |
 | `--posix` | ✅ | Alias for `-H pax` |
 | `--old-archive` / `--portability` | ✅ | Alias for `-H v7` |
-| `--pax-option=KW[:=]VAL` | ❌ | No-op: parsed and discarded; no `Config` field; PAX headers always emit fixed keywords |
+| `--pax-option=KW[:=]VAL` | ⚠️ Partial | `delete=KEYWORD` applied when writing PAX headers; other keywords accepted silently (not full GNU set) |
 
 ### File Selection
 
@@ -518,7 +518,7 @@ compatibility.
 
 | Feature | Config field(s) | Gap |
 |---------|----------------|-----|
-| `--pax-option` | *(none)* | ❌ No-op: parsed and discarded; no Config field; PAX headers always emit fixed keywords |
+| `--pax-option` | `pax_options`, `pax_option_rules` | ⚠️ Partial: `delete=KEYWORD` (repeatable / comma-list) suppresses that keyword in `write_pax_header` and sparse PAX emission; other keywords ignored |
 | `--volno-file` | `volno_file` | ❌ No-op: field never assigned from CLI; no volume-number read/write |
 | `--owner-map` / `--group-map` | `owner_map_file`, `group_map_file` | ✅ PR #172: fully implemented; maps uname/gname/uid/gid at create time |
 | `--info-script` / `--new-volume-script` | `info_script` | ⚠️ Stored; not exec'd at multi-volume boundaries |

@@ -795,6 +795,12 @@ static Block encode_header(const Entry& e, const Config& cfg) {
 
 // ── PAX extended header encode/decode ─────────────────────────────────────────
 
+/// True if --pax-option did not request delete= for this keyword.
+[[nodiscard]] static bool pax_allowed(const Config& cfg, std::string_view key)
+{
+    return !cfg.pax_option_rules.delete_keywords.contains(std::string(key));
+}
+
 // Encode a PAX record: "N keyword=value\n" where N = total length
 static void pax_append(std::string& out, std::string_view key, std::string_view val) {
     // Converge on the total record length: len = digits(len) + 1(space) + key + 1(=) + val + 1(\n)
@@ -813,6 +819,14 @@ static void pax_append(std::string& out, std::string_view key, std::string_view 
     out += '=';
     out += val;
     out += '\n';
+}
+
+/// Append a PAX record only when the keyword is not deleted via --pax-option.
+static void pax_append_if(std::string& out, const Config& cfg,
+                          std::string_view key, std::string_view val)
+{
+    if (pax_allowed(cfg, key))
+        pax_append(out, key, val);
 }
 
 static std::map<std::string, std::string> pax_parse(std::string_view data) {
@@ -1584,21 +1598,28 @@ private:
         write_data_bytes(data.data(), data.size());
     }
 
-    // Write PAX extended header
+    // Write PAX extended header (honours --pax-option delete=KEYWORD)
     void write_pax_header(const Entry& e, bool need_path, bool need_link,
-                          bool need_size, bool need_time) {
+                          bool need_size, bool need_time, const Config& cfg) {
         std::string pax_data;
-        if (need_path)   pax_append(pax_data, "path",     e.name);
-        if (need_link)   pax_append(pax_data, "linkpath", e.linkname);
-        if (need_size)   pax_append(pax_data, "size",     std::to_string(e.size));
-        if (e.uid > 0777777) pax_append(pax_data, "uid", std::to_string(e.uid));
-        if (e.gid > 0777777) pax_append(pax_data, "gid", std::to_string(e.gid));
+        if (need_path)
+            pax_append_if(pax_data, cfg, "path", e.name);
+        if (need_link)
+            pax_append_if(pax_data, cfg, "linkpath", e.linkname);
+        if (need_size)
+            pax_append_if(pax_data, cfg, "size", std::to_string(e.size));
+        if (e.uid > 0777777)
+            pax_append_if(pax_data, cfg, "uid", std::to_string(e.uid));
+        if (e.gid > 0777777)
+            pax_append_if(pax_data, cfg, "gid", std::to_string(e.gid));
         if (need_time && e.mtime_nsec != 0) {
-            pax_append(pax_data, "mtime",
+            pax_append_if(pax_data, cfg, "mtime",
                 std::format("{}.{:09d}", e.mtime, e.mtime_nsec));
         }
-        if (!e.uname.empty()) pax_append(pax_data, "uname", e.uname);
-        if (!e.gname.empty()) pax_append(pax_data, "gname", e.gname);
+        if (!e.uname.empty())
+            pax_append_if(pax_data, cfg, "uname", e.uname);
+        if (!e.gname.empty())
+            pax_append_if(pax_data, cfg, "gname", e.gname);
 
         if (pax_data.empty()) return;
 
@@ -1648,7 +1669,7 @@ private:
             // PAX path works for any length; use PAX extended header
             if (long_name || long_link || e.size > 077777777777LL || e.mtime_nsec != 0)
                 write_pax_header(e, long_name, long_link,
-                                 e.size > 077777777777LL, e.mtime_nsec != 0);
+                                 e.size > 077777777777LL, e.mtime_nsec != 0, cfg);
         } else {
             // GNU LongName/LongLink
             if (long_name) write_long_ext(GNUTYPE_LONGNAME, e.name);
@@ -1751,20 +1772,23 @@ private:
                 sparse_map_val += std::to_string(segs[si].length);
             }
 
-            // Build PAX extended header data
+            // Build PAX extended header data (honours --pax-option delete=KEYWORD)
             std::string pax_data;
-            pax_append(pax_data, "GNU.sparse.major",    "1");
-            pax_append(pax_data, "GNU.sparse.minor",    "0");
-            pax_append(pax_data, "GNU.sparse.name",     e.name);
-            pax_append(pax_data, "GNU.sparse.realsize", std::to_string(logical_size));
-            pax_append(pax_data, "GNU.sparse.map",      sparse_map_val);
+            pax_append_if(pax_data, cfg, "GNU.sparse.major",    "1");
+            pax_append_if(pax_data, cfg, "GNU.sparse.minor",    "0");
+            pax_append_if(pax_data, cfg, "GNU.sparse.name",     e.name);
+            pax_append_if(pax_data, cfg, "GNU.sparse.realsize",
+                          std::to_string(logical_size));
+            pax_append_if(pax_data, cfg, "GNU.sparse.map",      sparse_map_val);
             if (e.name.size() > 100)
-                pax_append(pax_data, "path", e.name);
+                pax_append_if(pax_data, cfg, "path", e.name);
             if (e.mtime_nsec != 0)
-                pax_append(pax_data, "mtime",
+                pax_append_if(pax_data, cfg, "mtime",
                     std::format("{}.{:09d}", e.mtime, e.mtime_nsec));
-            if (!e.uname.empty()) pax_append(pax_data, "uname", e.uname);
-            if (!e.gname.empty()) pax_append(pax_data, "gname", e.gname);
+            if (!e.uname.empty())
+                pax_append_if(pax_data, cfg, "uname", e.uname);
+            if (!e.gname.empty())
+                pax_append_if(pax_data, cfg, "gname", e.gname);
 
             // Emit PAX 'x' extended header block
             Entry pax_meta;
@@ -4331,8 +4355,33 @@ static Config parse_args(int argc, char* argv[]) {
         case OPT_HELP:    print_usage(argv[0]); std::exit(EXIT_SUCCESS);
         case OPT_VERSION: print_version();      std::exit(EXIT_SUCCESS);
 
+        case OPT_PAX_OPTION: {
+            // --pax-option=keyword[[:]=value][,keyword[[:]=value]]...
+            // Repeatable. MVP: only delete=KEYWORD (empty delete= ignored).
+            // Unknown keywords accepted silently (full GNU set is large).
+            if (!::optarg) break;
+            cfg.pax_options.emplace_back(::optarg);
+            std::string_view all = ::optarg;
+            while (!all.empty()) {
+                auto comma = all.find(',');
+                std::string_view item = (comma == std::string_view::npos)
+                    ? all : all.substr(0, comma);
+                if (comma == std::string_view::npos)
+                    all = {};
+                else
+                    all.remove_prefix(comma + 1);
+
+                if (item.starts_with("delete=")) {
+                    std::string_view kw = item.substr(7);
+                    if (!kw.empty())
+                        cfg.pax_option_rules.delete_keywords.emplace(kw);
+                }
+                // else: unknown / not-yet-implemented keyword — ignore
+            }
+            break;
+        }
+
         // Accepted but no-op for now (complex features not yet implemented)
-        case OPT_PAX_OPTION:
         case OPT_VOLNO_FILE:
         case OPT_IGNORE_CMD_ERR:
         case OPT_NO_IGNORE_CMD_ERR:
@@ -4635,7 +4684,7 @@ static void print_usage(const char* prog) {
         "\nArchive format selection:\n"
         "      --format=FORMAT, -H FORMAT  Create archive of the given format (v7 oldgnu gnu ustar pax)\n"
         "      --old-archive, --portability  Same as --format=v7\n"
-        "      --pax-option=keyword[[:]=value][,...]  Control pax keywords\n"
+        "      --pax-option=delete=KEYWORD[,...]  Suppress PAX keywords (delete= only; partial)\n"
         "      --posix                     Same as --format=posix\n"
         "  -V, --label=TEXT                Create archive with volume name TEXT\n"
         "\nCompression options:\n"
