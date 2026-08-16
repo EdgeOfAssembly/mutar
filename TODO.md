@@ -5,14 +5,15 @@
 - v0.1.0 — rename, index, seekable compress, freeze  
 - v0.2.0 — pax `delete=`, multi-vol between-member, xattrs/ACLs, Phase E polish, benches, formal path harness, `mutar.1`
 
-## Possible future work (not scheduled)
+## Active campaign
 
-These were **explicitly deferred** after v0.2.0. Implement only with a focused goal and tests — not as silent scope creep.
+**GNU tar CLI 100% parity (except SELinux):** see **`GOAL_GNU_PARITY.md`** (target **v0.3.0**).  
+That campaign **includes** mid-file multi-volume and full `--pax-option` (no longer deferred).
+
+## Possible future work (still not in GOAL_GNU_PARITY)
 
 | Item | Notes | Effort |
 |------|--------|--------|
-| **Mid-file multi-volume** | Split one large member across volumes (`GNUTYPE_MULTIVOL` / type `'M'`); reassemble on extract. Today: between-member rotation works; oversized single member errors clearly. | High |
-| **Full `--pax-option` keyword set** | Beyond `delete=KEYWORD`: `exthdr.name`, `globexthdr.*`, time/uid/gid transforms, etc. Audit against GNU tar before claiming “full”. | Medium–high |
 | **True compressed frame seek without materialize** | liblzma block index and/or zstd seekable format; keep materialize fallback. Today: selective extract of compressed archives decompresses fully once, then seeks. | High |
 
 ## Smaller / demand-driven (optional)

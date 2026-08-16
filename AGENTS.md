@@ -1,7 +1,8 @@
 # AGENTS.md — µtar (mutar) Agent Instructions
 
 This file is read by coding agents before starting work in the mutar project.
-Active backlog: `GOAL_NEXT.md`. Archived rename campaign: `GOAL.md`.
+Active campaign: `GOAL_GNU_PARITY.md` (100% GNU tar CLI except SELinux).
+Archived: `GOAL.md`, `GOAL_NEXT.md`.
 
 ---
 

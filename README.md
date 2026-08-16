@@ -13,8 +13,8 @@ Performance claims require published benchmarks; see `PROGRESS.md` Phase F.
 > **Manual:** `mutar.1` (`man ./mutar.1` or `man mutar` after install).
 > **Formal:** `make verify` (CTest + path-sanitize fixtures + CBMC when available).
 > See `COMPATIBILITY_PROGRESS.md` for an option-by-option audit and
-> `ARCHITECTURE.md` for design details. Archived campaign: `GOAL.md`.
-> **Next work:** `GOAL_NEXT.md`.
+> `ARCHITECTURE.md` for design details. Archived: `GOAL.md`, `GOAL_NEXT.md`.
+> **Active campaign:** `GOAL_GNU_PARITY.md` — 100% GNU tar CLI except SELinux (→ v0.3.0).
 
 ## Status
 
