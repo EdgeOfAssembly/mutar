@@ -50,11 +50,11 @@ When this campaign is complete:
 
 | ID | Gap | Acceptance |
 |----|-----|------------|
-| G1 | `--pax-option` stored, not applied | Writing PAX archives honors delete/exthdr/name keywords needed for GNU tar interop tests |
+| G1 | `--pax-option` pure no-op (not stored) | Writing PAX archives honors delete/exthdr/name keywords needed for GNU tar interop tests |
 | G2 | Multi-volume mid-file split incomplete | Create with `-M -L` can split a large file across volumes; extract reassembles |
 | G3 | `--info-script` / `--new-volume-script` not exec’d | Script runs at volume boundary; non-zero exit handled |
-| G4 | `--volno-file` not wired | Volume number read/written atomically |
-| G5 | Status tables still list some ✅ that are partial | Audit vs code; fix tables |
+| G4 | `--volno-file` no-op (field never assigned from CLI) | Volume number read/written atomically |
+| G5 | Status tables still list some ✅ that are partial | Audit vs code; fix tables (Phase A honesty pass) |
 
 ### P1 — Extended attributes (no SELinux)
 
@@ -74,7 +74,7 @@ When this campaign is complete:
 | G12 | `--quoting-style` | List/verbose output respects style |
 | G13 | `--restrict` | Dangerous options rejected when set |
 | G14 | `--check-device` | Wired into incremental device checks |
-| G15 | `--backup` / `--suffix` | On extract overwrite, create backups |
+| G15 | `--backup` / `--suffix` | Numbered/existing CONTROL (simple suffix rename already works) |
 
 ### P3 — Performance / seek evolution
 
@@ -214,7 +214,7 @@ Report after each phase: changes, commands+exit codes, residual risks.
 
 ## 9. Success metrics (checklist)
 
-- [ ] Phase A: no live `/tmp/Star` paths; status tables honest  
+- [x] Phase A: G22 path hygiene + G5 honest status tables (COMPAT/AGENTS/README)
 - [ ] G1 `--pax-option` tested  
 - [ ] G2–G4 multi-volume mid-file + scripts + volno  
 - [ ] G6–G8 xattrs/ACLs round-trip (when libs present)  

@@ -83,7 +83,7 @@ Legend:
 | `-H` / `--format=FORMAT` | ✅ | v7, oldgnu, gnu, ustar, pax |
 | `--posix` | ✅ | Alias for `-H pax` |
 | `--old-archive` / `--portability` | ✅ | Alias for `-H v7` |
-| `--pax-option=KW[:=]VAL` | ⚠️ | Stored in `Config`; not applied to PAX headers |
+| `--pax-option=KW[:=]VAL` | ❌ | No-op: parsed and discarded; no `Config` field; PAX headers always emit fixed keywords |
 
 ### File Selection
 
@@ -148,10 +148,10 @@ Legend:
 | `--skip-old-files` | ✅ | |
 | `--keep-newer-files` | ✅ | |
 | `--overwrite` | ✅ | |
-| `--overwrite-dir` | ⚠️ | Accepted; not yet wired into extract (known gap) |
+| `--overwrite-dir` | ✅ | PR #172: DIRTYPE extract respects flag (default on) |
 | `-U` / `--unlink-first` | ✅ | |
 | `--recursive-unlink` | ✅ | |
-| `--no-overwrite-dir` | ⚠️ | Accepted; not yet wired into extract (known gap) |
+| `--no-overwrite-dir` | ✅ | PR #172: skips dir mtime/mode fixup when target exists |
 | `-s` / `--preserve-order` / `--same-order` | ⚠️ | Accepted; emits not-implemented warning; not wired into traversal |
 | `-p` / `--preserve` | ✅ | |
 | `--delay-directory-restore` | ✅ | |
@@ -161,7 +161,7 @@ Legend:
 | Option | Status | Notes |
 |--------|--------|-------|
 | `-S` / `--sparse` | ✅ | GNU 'S' format |
-| `--sparse-version=M.N` | ✅ | 0.0, 0.1, 1.0 |
+| `--sparse-version=M.N` | ⚠️ | String stored only; write path hardcodes GNU.sparse 1.0 (major/minor never parsed from CLI) |
 | `--hole-detection=METHOD` | 🔧 | `seek` / `raw` wired into `detect_sparse_segments()` |
 
 ### Informational / Output
@@ -194,7 +194,7 @@ Legend:
 |--------|--------|-------|
 | `-W` / `--verify` | 🆕 | Post-create re-read verification implemented |
 | `--interactive` / `--confirmation` | 🆕 | Per-file confirmation prompts |
-| `--check-device` / `--no-check-device` | ⚠️ | Stored; device checking not wired |
+| `--check-device` / `--no-check-device` | ❌ | No-op: pure parse discard; no `Config` field; incremental compares mtime only |
 
 ### Incremental / Snapshot
 
@@ -209,10 +209,10 @@ Legend:
 
 | Option | Status | Notes |
 |--------|--------|-------|
-| `-M` / `--multi-volume` | 🔧 | PR #172: volume filename cycling + prompts implemented; file-split across volumes is TODO |
-| `-L` / `--tape-length=N` | 🔧 | PR #172: properly parsed and stored; rotation prompt fires when limit is approached |
-| `-F` / `--info-script=CMD` / `--new-volume-script=CMD` | ⚠️ | Stored; not executed |
-| `--volno-file=FILE` | ⚠️ | Stored; volume numbering not implemented |
+| `-M` / `--multi-volume` | ⚠️ | Partial: `make_volume_name` + TTY prompts exist; rotation requires `tape_length > 0` (never set via CLI); no stream swap; no mid-file split |
+| `-L` / `--tape-length=N` | ⚠️ | Broken parse: only `tape_length_str` stored; numeric `cfg.tape_length` never set via CLI (`OPT_TAPE_LENGTH` unreachable), so multi-vol rotation never fires |
+| `-F` / `--info-script=CMD` / `--new-volume-script=CMD` | ⚠️ | Stored in `info_script`; never executed |
+| `--volno-file=FILE` | ❌ | No-op: `Config::volno_file` exists but CLI never assigns it; no vol-number I/O |
 
 ### Remote Archives
 
@@ -227,8 +227,8 @@ Legend:
 |--------|--------|-------|
 | `--sort=ORDER` | ✅ | `name` implemented; `inode` accepted |
 | `--remove-files` | ✅ | |
-| `--backup[=CONTROL]` | ⚠️ | Parsed; no-op |
-| `--suffix=SUFFIX` | ⚠️ | Parsed; no-op |
+| `--backup[=CONTROL]` | ⚠️ | Partial: simple suffix rename on extract overwrite works; `none`/`off` disables; numbered/existing CONTROL not implemented |
+| `--suffix=SUFFIX` | ⚠️ | Partial: sets `backup_suffix` (default `~`); used by simple backup rename |
 | `--help` | 🆕 | All ~100 options now listed |
 | `--version` | ✅ | |
 | `--usage` | ✅ | |
@@ -315,11 +315,11 @@ The `cfg.preserve_order` flag is parsed and stored. The option **emits a
 `walk_dir()` or any other traversal code — directory ordering is controlled
 solely by `cfg.sort_order`. This remains a known gap.
 
-### 11. `--overwrite-dir` (partial / no-op)
+### 11. `--overwrite-dir` / `--no-overwrite-dir` (implemented)
 
-`cfg.overwrite_dir` is parsed and stored (default: `true`). **The flag is not
-yet wired into extraction logic** — existing directory metadata is neither
-preserved nor overwritten based on this flag. This remains a known gap.
+`cfg.overwrite_dir` (default `true`) and `cfg.no_overwrite_dir` are mutually
+exclusive. In `op_extract` DIRTYPE handling, an existing directory target skips
+mtime/permission fixup when `--no-overwrite-dir` is set; otherwise fixup proceeds.
 
 ### 12. `--exclude-vcs-ignores` implemented (adds `.bzrignore`)
 
@@ -445,15 +445,19 @@ to include all new/modified entries.
 **Limitation**: only regular files are compared by mtime. Directories,
 symlinks, and special files are always archived on level≥1.
 
-### 4. Multi-volume support (`-M --tape-length=N`)
+### 4. Multi-volume support (`-M --tape-length=N`) — partial / broken CLI
 
-`--tape-length=N` is now properly parsed into `cfg.tape_length` (in kB).
 `make_volume_name()` generates filenames using `%d` substitution or `.N`
-suffix. In `op_create`, when `block_no()` exceeds the tape limit, a rotation
-prompt is printed and the user is prompted for the next volume. The
-`ArchiveWriter` stream swap is not yet implemented (TODO for a future PR).
+suffix. Create-side rotation is gated on `cfg.multi_volume && cfg.tape_length > 0`,
+but `-L` / `--tape-length` only store `tape_length_str` — numeric `cfg.tape_length`
+is never set from the CLI (`OPT_TAPE_LENGTH` case is unreachable). Result: rotation
+prompts never fire via normal flags. Even if `tape_length` were set, after the
+prompt the code warns and continues on the same volume (no `ArchiveWriter` stream
+swap; no mid-file split). Extract `-M` prompts on EOF then breaks without swapping
+the reader stream.
 
-In `op_extract`, `-M` prompts for the next volume after each EOF.
+`--volno-file` is a pure no-op (field never assigned). `--info-script` is stored
+but never executed.
 
 ### 5. Remote tape / rmt (`--rsh-command` / `--rmt-command`)
 
@@ -514,17 +518,20 @@ compatibility.
 
 | Feature | Config field(s) | Gap |
 |---------|----------------|-----|
-| `--pax-option` | `pax_option` | Stored; not applied when writing PAX extended headers |
-| `--volno-file` | `volno_file` | Stored; volume numbering not implemented |
+| `--pax-option` | *(none)* | ❌ No-op: parsed and discarded; no Config field; PAX headers always emit fixed keywords |
+| `--volno-file` | `volno_file` | ❌ No-op: field never assigned from CLI; no volume-number read/write |
 | `--owner-map` / `--group-map` | `owner_map_file`, `group_map_file` | ✅ PR #172: fully implemented; maps uname/gname/uid/gid at create time |
-| `--info-script` / `--new-volume-script` | `info_script` | Stored; not exec'd for multi-volume |
-| `--check-device` / `--no-check-device` | `check_device` | Stored; device comparison not wired |
-| `--restrict` | `restrict_flag` | Stored; no privilege restrictions enforced |
-| `--quoting-style` | `quoting_style` | Stored; output quoting unchanged |
+| `--info-script` / `--new-volume-script` | `info_script` | ⚠️ Stored; not exec'd at multi-volume boundaries |
+| `--check-device` / `--no-check-device` | *(none)* | ❌ No-op: pure parse discard; no Config field; incremental compares mtime only |
+| `--restrict` | `restrict_opt` | ⚠️ Stored; no privilege restrictions enforced |
+| `--quoting-style` | `quoting_style` | ⚠️ Stored; list/verbose output never consults style |
+| `--backup` / `--suffix` | `backup`, `backup_control`, `backup_suffix` | ⚠️ Simple suffix rename on extract works; numbered/existing CONTROL not implemented |
+| `--sparse-version` | `sparse_version` | ⚠️ String stored; `sparse_major`/`sparse_minor` never parsed; write hardcodes 1.0 |
+| `-L` / `--tape-length` | `tape_length_str`, `tape_length` | ⚠️ Only string stored via CLI; numeric `tape_length` never set so rotation never fires |
 | `--xattrs` / `--acls` | `xattrs`, `acls` | Build-time detection; flags accepted; **store/restore not yet implemented** (GOAL_NEXT G6–G8) |
 | `--selinux` / `--no-selinux` | `selinux` | **Unsupported by policy** (no test hardware); accepted as no-op with warning |
 | `-G` / `-g` (incremental) | `listed_incremental` | ✅ PR #172: snapshot written at level-0; level≥1 skips unchanged files. Limitation: only regular files compared by mtime. |
-| `-M` (multi-volume) | `multi_volume` | 🔧 PR #172: volume naming + prompts work; ArchiveWriter stream-swap for mid-file continuation is TODO |
+| `-M` (multi-volume) | `multi_volume` | ⚠️ Prompts/naming exist; rotation dead without CLI `tape_length`; no stream swap; no mid-file split |
 | `--rsh-command` / `--rmt-command` | `rsh_command`, `rmt_command` | 🔧 PR #172: rmt bridge via rsh fork+pipe; O/R/W/C protocol implemented. Limitation: lseek over rmt not implemented |
 | PAX sparse write format | `fmt_` | ✅ PR #172: when `--format=pax`, GNU.sparse.* PAX keywords emitted; GNU.sparse.map parsed on read |
 | `--warning=KEYWORD` | `warnings_enabled/disabled` | ✅ PR #172: `mutar_warn()` helper implemented and wired at key emission sites |

@@ -191,40 +191,42 @@ Magic-byte auto-detection works on read even without `-a`.
 - Exclusion: `--exclude-vcs-ignores` (reads `.gitignore`, `.hgignore`, `.cvsignore`, `.bzrignore`)
 - Verification: `--verify` / `-W` — post-create read-back verification
 - Interaction: `--interactive` / `--confirmation` — per-file confirmation prompts (reads from `/dev/tty`)
-- Warnings: `--warning=KEYWORD` option accepted (parsed, stored; see no-op section below)
+- Warnings: `--warning=KEYWORD` — `mutar_warn()` wired at key emission sites
 - Help: `--help` prints all ~100 options; `--version` prints version string
 
-### Accepted (parsed, stored — no-op or partial)
+### Accepted (no-op or partial — honest status)
 
 | Option | Status | Notes |
 |--------|--------|-------|
-| `--pax-option` | ⚠️ Partial | Stored but not applied to PAX keyword processing |
-| `--volno-file` | ⚠️ Partial | Stored but volume numbering not fully implemented |
-| `--owner-map` / `--group-map` | ⚠️ Partial | Stored but UID/GID mapping not applied |
-| `--info-script` / `--new-volume-script` | ⚠️ Partial | Stored but not executed for multi-volume |
-| `--check-device` / `--no-check-device` | ⚠️ Partial | Stored but device checking not wired |
-| `--restrict` | ⚠️ Partial | Stored but restrictions not enforced |
-| `--quoting-style` | ⚠️ Partial | Stored but output quoting style not changed |
-| `--xattrs` / `--acls` / `--selinux` | ⚠️ Partial | Accepted, not stored/restored |
-| `-G -g --listed-incremental` | ⚠️ Partial | Accepted; snapshot file not maintained (beyond `--level=0`) |
-| `--multi-volume -M -L -F` | ⚠️ Partial | Accepted; volume switching not implemented |
-| `--rsh-command --rmt-command` | ⚠️ Partial | Accepted; remote tape (`rmt`) not wired |
-| `--backup --suffix` | ⚠️ Partial | Accepted, no-op |
+| `--pax-option` | ❌ No-op | Parsed and discarded; no Config field; PAX headers always emit fixed keywords |
+| `--volno-file` | ❌ No-op | Field exists but never assigned from CLI; no volume-number I/O |
+| `--check-device` / `--no-check-device` | ❌ No-op | Pure parse discard; no Config field |
+| `--info-script` / `--new-volume-script` | ⚠️ Partial | Stored; not executed at volume boundaries |
+| `--restrict` | ⚠️ Partial | Stored (`restrict_opt`); restrictions not enforced |
+| `--quoting-style` | ⚠️ Partial | Stored; list/verbose output never consults style |
+| `--xattrs` / `--acls` | ⚠️ Partial | Flags accepted when built; store/restore not implemented |
+| `--selinux` / `--no-selinux` | ❌ Unsupported | Policy: no-op + warning (no test hardware) |
+| `-G -g --listed-incremental` | ⚠️ Partial | Level-0 snapshot + level≥1 mtime skip for regular files; dirs/specials always archived |
+| `--multi-volume -M -L -F` | ⚠️ Partial | Naming/prompts exist; `-L` only stores string so rotation never fires; no stream swap / mid-file split |
+| `--rsh-command --rmt-command` | ⚠️ Partial | rmt O/R/W/C bridge via rsh; lseek/append not supported |
+| `--backup --suffix` | ⚠️ Partial | Simple suffix rename on extract overwrite works; numbered/existing CONTROL not implemented |
 | `-s / --preserve-order` | ⚠️ Partial | Accepted (emits warning); not yet wired into traversal |
-| `--overwrite-dir` / `--no-overwrite-dir` | ⚠️ Partial | Accepted; directory metadata overwrite behavior not yet wired |
-| `--warning=KEYWORD` | ⚠️ Partial | Accepted and parsed into sets; not yet wired into warning emission sites |
+| `--sparse-version` | ⚠️ Partial | String stored; write path hardcodes GNU.sparse 1.0 |
+| `--owner-map` / `--group-map` | ✅ | Loaded and applied at create time (PR #172) |
+| `--overwrite-dir` / `--no-overwrite-dir` | ✅ | Wired in DIRTYPE extract (PR #172) |
+| `--warning=KEYWORD` | ✅ | `mutar_warn()` wired at key emission sites (PR #172) |
 
 ### Known Gaps / Future Work
 
 | Feature | Notes |
 |---------|-------|
-| xattrs / ACLs / SELinux | Parsing hooks ready, no store/restore |
-| Incremental backups (`-G -g`) | `--level=0` done; full snapshot state files not yet |
-| Remote tape (`--rsh/rmt-command`) | `rmt` protocol not wired |
-| Multi-volume archives (`-M`) | Volume switching not implemented |
-| PAX sparse write format | GNU 'S' format written; PAX extended-header sparse map not emitted |
-| `--pax-option` keyword processing | Stored but not applied |
-| UID/GID map files | `--owner-map` / `--group-map` not applied |
+| xattrs / ACLs | Flags only; no store/restore (SELinux unsupported by policy) |
+| Incremental backups (`-G -g`) | Snapshot works for regular-file mtime; dirs/specials always archived |
+| Remote tape (`--rsh/rmt-command`) | Bridge works; lseek over rmt / remote append not implemented |
+| Multi-volume archives (`-M`) | Fix `-L` numeric parse; stream swap; mid-file continuation |
+| `--pax-option` keyword processing | Pure no-op today; needs Config field + apply in `write_pax_header` |
+| `--volno-file` / `--info-script` | volno never assigned; info-script never exec'd |
+| `--backup` CONTROL | Simple suffix only; numbered/existing not implemented |
 
 ---
 
@@ -245,7 +247,7 @@ Magic-byte auto-detection works on read even without `-a`.
 |---------|--------|
 | `--verify` | Post-create re-read verification implemented in `op_create()` |
 | `--interactive` | Per-file confirmation prompts during extract (reads from `/dev/tty`) |
-| `--warning=KEYWORD` | Warning option accepted and parsed (not yet wired to emission sites — see partial table) |
+| `--warning=KEYWORD` | Parsed into enable/disable sets; emission wired via `mutar_warn()` in PR #172 |
 | `--exclude` anchoring | `--anchored/--ignore-case/--wildcards-match-slash` wired into `is_excluded()` |
 | `--show-omitted-dirs` | Wired: excluded dirs during create and unmatched dirs during list |
 | `--show-transformed-names` | Wired into create transform path |
@@ -253,7 +255,7 @@ Magic-byte auto-detection works on read even without `-a`.
 | `--checkpoint-action` | `dot/echo/ttyout` actions; default (no action) prints `checkpoint N` message |
 | `--full-time` | Nanosecond timestamps in `--list` output |
 | `-s / --preserve-order` | Accepted; emits not-implemented warning (see partial table) |
-| `--overwrite-dir` | Accepted; behavior not yet fully wired (see partial table) |
+| `--overwrite-dir` | Fully wired in DIRTYPE extract (PR #172) |
 | `--exclude-vcs-ignores` | Reads `.gitignore`, `.hgignore`, `.cvsignore`, `.bzrignore` |
 | `--hole-detection=seek/raw` | Wired into `detect_sparse_segments()`; implies `--sparse` |
 | `--level=0` | Level-0 incremental archive creation |

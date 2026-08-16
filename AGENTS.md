@@ -61,9 +61,9 @@ Every PR for mutar must include a status table like this:
 | Option | Status | Notes |
 |--------|--------|-------|
 | `-c`, `--create` | ✅ Implemented | Full parity with tar.1 |
-| `-S`, `--sparse` | ⚠️ Partial | Basic sparse support; `--hole-detection` / `--sparse-version` not wired |
-| `--pax-option` | ❌ No-op | Parsed, silently ignored |
-| `--verify` | ❌ No-op | Flag stored, no verification logic |
+| `-S`, `--sparse` | ⚠️ Partial | Sparse write/extract works; `--hole-detection` wired; `--sparse-version` string-only (always emit 1.0) |
+| `--pax-option` | ❌ No-op | Parsed and discarded; no Config field |
+| `--verify` | ✅ Implemented | Post-create re-read verification |
 
 Status key:
 - ✅ **Implemented** — observable behavior matches tar.1; tested
@@ -122,20 +122,27 @@ For any PR changing mutar behavior:
 
 ---
 
-## Known No-Op Options (do not claim as implemented)
+## Known Gaps (do not claim full tar.1 parity)
 
-See `COMPATIBILITY_PROGRESS.md` for the full option audit. Summary of known gaps:
+See `COMPATIBILITY_PROGRESS.md` for the full option audit. Short list matching code truth:
 
-- `--pax-option`, `--hole-detection`, `--level`, `--volno-file`
-- `--ignore-command-error`, `--no-ignore-command-error`
-- `--owner-map`, `--group-map`
-- `--exclude-vcs-ignores`
-- `--tape-length`, `--info-script`, `--check-device`
-- `--no-xattrs`, `--xattrs-include`, `--xattrs-exclude`, `--no-selinux`, `--no-acls`
-- `--warning`, `--wildcards*`, `--quoting-style`, `--unquote`
-- `-s` / `--preserve-order`
-- `--verify`, `--index-file`, `--checkpoint-action` (logic missing)
-- `--interactive`, `--restrict`, `--full-time` (behavior not wired)
+**True no-ops / broken parse:**
+- `--pax-option` — parsed, discarded; no Config field
+- `--volno-file` — field exists but never assigned from CLI
+- `--check-device` / `--no-check-device` — pure discard; no Config field
+- `--quoting-style` — stored, never used for list/verbose output
+- `--restrict` — stored (`restrict_opt`), not enforced
+- SELinux (`--selinux` / `--no-selinux`) — policy-unsupported no-op + warning
+
+**Partial (do not claim complete):**
+- Multi-volume (`-M`): naming/prompts exist; rotation dead without numeric `tape_length` (CLI only stores string via `-L`)
+- `--info-script` / `--new-volume-script` — stored, never executed
+- `--xattrs` / `--acls` (and include/exclude) — flags only; no store/restore
+- `--backup` / `--suffix` — simple suffix rename works; numbered/existing CONTROL not implemented
+- `-s` / `--preserve-order` — accepted with not-implemented warning
+- `--sparse-version` — string stored; write hardcodes 1.0
+
+**Implemented (do not list as no-ops):** `--verify`, `--hole-detection`, `--owner-map` / `--group-map`, `--exclude-vcs-ignores`, `--index-file`, `--checkpoint-action`, `--interactive`, `--full-time`, `--warning`, wildcards/anchoring, `--overwrite-dir` / `--no-overwrite-dir`, and related PR #170/#172 features.
 
 ---
 
