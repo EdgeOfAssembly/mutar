@@ -327,11 +327,11 @@ Report after each phase: commits, tests+exit codes, residual gaps.
 - [ ] G0.1 `--show-snapshot-field-ranges`  
 - [x] G1.1 full `--pax-option`  
 - [ ] G1.2 `--sparse-version`  
-- [ ] G1.3 `-s` / preserve-order  
+- [x] G1.3 `-s` / preserve-order  
 - [x] G1.4 `-G` incremental  
 - [x] G1.5 `-g` listed-incremental complete  
 - [x] G1.6 mid-file multi-volume  
-- [ ] G1.7 rmt lseek + remote append  
+- [x] G1.7 rmt lseek + remote append  
 - [ ] G1.8–G1.11 unquote, verbatim, ignore-command-error, quote-chars  
 - [x] G1.12 exclude-ignore*  
 - [ ] G1.13–G1.16 atime-preserve, totals SIGNAL, `-o` create, quoting styles  

@@ -132,8 +132,8 @@ See `COMPATIBILITY_PROGRESS.md` for the full option audit. Short list matching c
 
 **Partial (do not claim complete):**
 - Multi-volume (`-M -L`): between-member + mid-file split (`GNUTYPE_MULTIVOL` 'M'); extract reassembly
-- rmt: O/R/W/C bridge works; lseek (`S`) / remote append not implemented
-- `-s` / `--preserve-order` — accepted with not-implemented warning
+- rmt: O/R/W/L/C via rsh (L=lseek); remote -r/-u when seek works; compressed remote not supported
+- ~~`-s` / `--preserve-order`~~ — implemented (Phase 7)
 
 **Implemented (do not list as no-ops):** `--pax-option` (full GNU set), `--restrict`, `--backup` CONTROL (`none`/`simple`/`numbered`/`existing`), `--quoting-style`, `--check-device`/`--no-check-device`, `--xattrs` / `--acls` (SCHILY PAX when built with lib support), `--verify`, `--hole-detection`, `--owner-map` / `--group-map`, `--exclude-vcs-ignores`, `--exclude-ignore` / `--exclude-ignore-recursive`, `-G` dumpdir create/extract, `-g` listed-incremental (skip files/symlinks/specials; dirs always dumped), `--sparse-version`, `--index-file`, `--checkpoint-action`, `--interactive`, `--full-time`, `--warning`, wildcards/anchoring, `--overwrite-dir` / `--no-overwrite-dir`, and related PR #170/#172 features.
 

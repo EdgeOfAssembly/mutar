@@ -219,9 +219,9 @@ Magic-byte auto-detection works on read even without `-a`.
 | `-G -g --listed-incremental` | ✅ | `-G` dumpdir create/extract purge; `-g` snapshot V2; level≥1 skips unchanged files/symlinks/specials; dirs always dumped |
 | `--exclude-ignore{,-recursive}` | ✅ | Per-directory ignore files (children only vs whole subtree) |
 | `--multi-volume -M -L` | ✅ | Between-member + mid-file split (`GNUTYPE_MULTIVOL` 'M'); extract reassembly; GNU tar interop |
-| `--rsh-command --rmt-command` | ⚠️ Partial | rmt O/R/W/C bridge via rsh; lseek (`S`) / remote append not supported |
+| `--rsh-command --rmt-command` | ✅ Implemented | rmt O/R/W/L/C via rsh; L=lseek enables remote -r/-u (uncompressed) |
 | `--backup --suffix` | ✅ | `none`/`off`, `simple`/`never`, `numbered`/`t`, `existing`/`nil` (+ `--suffix`) |
-| `-s / --preserve-order` | ⚠️ Partial | Accepted (emits warning); not yet wired into traversal |
+| `-s / --preserve-order` | ✅ Implemented | GNU same-order extract: want-list head advances on match |
 | `--sparse-version` | ⚠️ Partial | String stored; write path hardcodes GNU.sparse 1.0 |
 | `--owner-map` / `--group-map` | ✅ | Loaded and applied at create time (PR #172) |
 | `--overwrite-dir` / `--no-overwrite-dir` | ✅ | Wired in DIRTYPE extract (PR #172) |
@@ -233,7 +233,7 @@ Magic-byte auto-detection works on read even without `-a`.
 |---------|-------|
 | SELinux | Unsupported by policy (`--selinux` no-op + warning); never stored under `--xattrs` |
 | Incremental backups (`-G -g`) | ✅ dumpdir + listed-incremental skip (see COMPATIBILITY_PROGRESS Phase 3) |
-| Remote tape (`--rsh/rmt-command`) | Bridge works; lseek over rmt / remote append not implemented |
+| Remote tape (`--rsh/rmt-command`) | O/R/W/L/C; remote append/update via L |
 | Multi-volume mid-file split | ✅ Implemented (Phase 5 / G1.6) |
 | `--pax-option` keyword processing | full GNU set for create/list/extract (see COMPATIBILITY_PROGRESS) |
 
@@ -263,7 +263,7 @@ Magic-byte auto-detection works on read even without `-a`.
 | `--index-file` | Verbose output routed exclusively to file during create/list/extract |
 | `--checkpoint-action` | `dot/echo/ttyout` actions; default (no action) prints `checkpoint N` message |
 | `--full-time` | Nanosecond timestamps in `--list` output |
-| `-s / --preserve-order` | Accepted; emits not-implemented warning (see partial table) |
+| `-s / --preserve-order` | GNU same-order member extract |
 | `--overwrite-dir` | Fully wired in DIRTYPE extract (PR #172) |
 | `--exclude-vcs-ignores` | Reads `.gitignore`, `.hgignore`, `.cvsignore`, `.bzrignore` |
 | `--hole-detection=seek/raw` | Wired into `detect_sparse_segments()`; implies `--sparse` |

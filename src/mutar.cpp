@@ -294,13 +294,245 @@ static Compress detect_compress_magic(int fd) {
     return Compress::None;
 }
 
-// ── ArchiveStream: wraps a raw fd, optionally piped through decompressor ──────
-// Forward-declare remote helpers (defined after the ArchiveStream section)
-static bool is_remote_archive(const std::string& path, bool force_local);
-static int  open_remote_stream(const std::string& archive_file,
-                                const std::string& rsh_cmd,
-                                const std::string& rmt_cmd,
-                                bool for_write);
+// ── Remote tape (rmt) helpers ─────────────────────────────────────────────────
+
+static bool is_remote_archive(const std::string& path, bool force_local) {
+    if (force_local) return false;
+    if (path.empty() || path == "-") return false;
+    auto colon = path.find(':');
+    if (colon == std::string::npos || colon == 0) return false;
+    // Make sure the part before ':' has no '/' (that would be a local path)
+    auto slash = path.find('/');
+    return slash == std::string::npos || slash > colon;
+}
+
+// Parse [user@]host:path → {user, host, path}  (user may be empty)
+static std::tuple<std::string,std::string,std::string> parse_remote_path(const std::string& s) {
+    auto colon = s.find(':');
+    std::string hostpart = s.substr(0, colon);
+    std::string path     = s.substr(colon + 1);
+    std::string user, host;
+    auto at = hostpart.find('@');
+    if (at != std::string::npos) { user = hostpart.substr(0, at); host = hostpart.substr(at + 1); }
+    else host = hostpart;
+    return {user, host, path};
+}
+
+/// Speaks the GNU/BSD rmt protocol (O/R/W/L/C) over pipes to `rsh host rmt`.
+/// L is lseek (whence + offset); S is status/ioctl and is not used here.
+class RmtSession {
+public:
+    static std::unique_ptr<RmtSession> connect_and_open(
+            const std::string& archive_file,
+            const std::string& rsh_cmd_arg,
+            const std::string& rmt_cmd_arg,
+            int open_flags) {
+        auto [user, host, remote_path] = parse_remote_path(archive_file);
+        const std::string rsh_bin = rsh_cmd_arg.empty() ? "rsh" : rsh_cmd_arg;
+        const std::string rmt_bin = rmt_cmd_arg.empty() ? "rmt" : rmt_cmd_arg;
+
+        int to_rmt[2]{-1, -1};
+        int from_rmt[2]{-1, -1};
+        if (::pipe(to_rmt) < 0 || ::pipe(from_rmt) < 0) {
+            print(stderr, "mutar: rmt pipe: {}\n", std::strerror(errno));
+            if (to_rmt[0] >= 0) { ::close(to_rmt[0]); ::close(to_rmt[1]); }
+            if (from_rmt[0] >= 0) { ::close(from_rmt[0]); ::close(from_rmt[1]); }
+            return nullptr;
+        }
+
+        pid_t pid = ::fork();
+        if (pid < 0) {
+            print(stderr, "mutar: rmt fork: {}\n", std::strerror(errno));
+            ::close(to_rmt[0]); ::close(to_rmt[1]);
+            ::close(from_rmt[0]); ::close(from_rmt[1]);
+            return nullptr;
+        }
+        if (pid == 0) {
+            // Child: rsh [ -l user ] host rmt
+            ::dup2(to_rmt[0], STDIN_FILENO);
+            ::dup2(from_rmt[1], STDOUT_FILENO);
+            ::close(to_rmt[0]); ::close(to_rmt[1]);
+            ::close(from_rmt[0]); ::close(from_rmt[1]);
+            if (!user.empty())
+                ::execlp(rsh_bin.c_str(), rsh_bin.c_str(),
+                         "-l", user.c_str(), host.c_str(), rmt_bin.c_str(), nullptr);
+            else
+                ::execlp(rsh_bin.c_str(), rsh_bin.c_str(),
+                         host.c_str(), rmt_bin.c_str(), nullptr);
+            ::_exit(127);
+        }
+        ::close(to_rmt[0]);
+        ::close(from_rmt[1]);
+
+        auto sess = std::unique_ptr<RmtSession>(new RmtSession());
+        sess->to_rmt_ = to_rmt[1];
+        sess->from_rmt_ = from_rmt[0];
+        sess->rsh_pid_ = pid;
+
+        // O<path>\n<flags>\n  (no space after O — path is the rest of the line)
+        std::string open_cmd = std::format("O{}\n{}\n", remote_path, open_flags);
+        if (!sess->send_cmd(open_cmd) || sess->read_status() < 0) {
+            print(stderr, "mutar: rmt: remote open failed for '{}'\n", remote_path);
+            sess->close();
+            return nullptr;
+        }
+        sess->file_open_ = true;
+        return sess;
+    }
+
+    ~RmtSession() { close(); }
+
+    RmtSession(const RmtSession&) = delete;
+    RmtSession& operator=(const RmtSession&) = delete;
+    RmtSession(RmtSession&& o) noexcept { *this = std::move(o); }
+    RmtSession& operator=(RmtSession&& o) noexcept {
+        if (this != &o) {
+            close();
+            to_rmt_ = o.to_rmt_; from_rmt_ = o.from_rmt_;
+            rsh_pid_ = o.rsh_pid_; file_open_ = o.file_open_;
+            o.to_rmt_ = o.from_rmt_ = -1;
+            o.rsh_pid_ = -1; o.file_open_ = false;
+        }
+        return *this;
+    }
+
+    ssize_t read(void* buf, std::size_t n) {
+        if (n == 0) return 0;
+        auto* out = static_cast<char*>(buf);
+        std::size_t total = 0;
+        while (total < n) {
+            std::size_t chunk = std::min(n - total, std::size_t{10240});
+            if (!send_cmd(std::format("R{}\n", chunk)))
+                return total == 0 ? ssize_t{-1} : static_cast<ssize_t>(total);
+            long long got = read_status();
+            if (got < 0)
+                return total == 0 ? ssize_t{-1} : static_cast<ssize_t>(total);
+            if (got == 0) break; // EOF
+            if (static_cast<std::size_t>(got) > chunk) got = static_cast<long long>(chunk);
+            if (!read_exact(out + total, static_cast<std::size_t>(got)))
+                return total == 0 ? ssize_t{-1} : static_cast<ssize_t>(total);
+            total += static_cast<std::size_t>(got);
+            if (static_cast<std::size_t>(got) < chunk) break; // short read → EOF soon
+        }
+        return static_cast<ssize_t>(total);
+    }
+
+    bool write(const void* buf, std::size_t n) {
+        const auto* p = static_cast<const char*>(buf);
+        std::size_t total = 0;
+        while (total < n) {
+            std::size_t chunk = std::min(n - total, std::size_t{10240});
+            if (!send_cmd(std::format("W{}\n", chunk)))
+                return false;
+            if (!send_all(p + total, chunk))
+                return false;
+            long long wr = read_status();
+            if (wr < 0 || static_cast<std::size_t>(wr) != chunk)
+                return false;
+            total += chunk;
+        }
+        return true;
+    }
+
+    /// rmt L command: L<whence>\n<offset>\n → A<new_offset>\n
+    off_t seek(off_t offset, int whence) {
+        int w = 0;
+        switch (whence) {
+        case SEEK_SET: w = 0; break;
+        case SEEK_CUR: w = 1; break;
+        case SEEK_END: w = 2; break;
+        default: errno = EINVAL; return static_cast<off_t>(-1);
+        }
+        if (!send_cmd(std::format("L{}\n{}\n", w, static_cast<long long>(offset)))) {
+            errno = EIO;
+            return static_cast<off_t>(-1);
+        }
+        long long pos = read_status();
+        if (pos < 0) {
+            errno = EIO;
+            return static_cast<off_t>(-1);
+        }
+        return static_cast<off_t>(pos);
+    }
+
+    void close() {
+        if (file_open_ && to_rmt_ >= 0) {
+            send_cmd("C\n");
+            (void)read_status();
+            file_open_ = false;
+        }
+        if (to_rmt_ >= 0) { ::close(to_rmt_); to_rmt_ = -1; }
+        if (from_rmt_ >= 0) { ::close(from_rmt_); from_rmt_ = -1; }
+        if (rsh_pid_ > 0) {
+            int st = 0;
+            ::waitpid(rsh_pid_, &st, 0);
+            rsh_pid_ = -1;
+        }
+    }
+
+private:
+    RmtSession() = default;
+
+    int   to_rmt_   = -1;
+    int   from_rmt_ = -1;
+    pid_t rsh_pid_  = -1;
+    bool  file_open_ = false;
+
+    bool send_all(const void* data, std::size_t n) {
+        const auto* p = static_cast<const char*>(data);
+        while (n > 0) {
+            ssize_t w = ::write(to_rmt_, p, n);
+            if (w < 0) { if (errno == EINTR) continue; return false; }
+            if (w == 0) return false;
+            p += w; n -= static_cast<std::size_t>(w);
+        }
+        return true;
+    }
+
+    bool send_cmd(std::string_view cmd) {
+        return send_all(cmd.data(), cmd.size());
+    }
+
+    std::string read_line() {
+        std::string resp;
+        char c;
+        while (::read(from_rmt_, &c, 1) == 1) {
+            resp += c;
+            if (c == '\n') break;
+        }
+        return resp;
+    }
+
+    bool read_exact(char* buf, std::size_t n) {
+        std::size_t got = 0;
+        while (got < n) {
+            ssize_t r = ::read(from_rmt_, buf + got, n - got);
+            if (r < 0) { if (errno == EINTR) continue; return false; }
+            if (r == 0) return false;
+            got += static_cast<std::size_t>(r);
+        }
+        return true;
+    }
+
+    /// Parse A<number>\\n success or E... error. Returns number or -1.
+    long long read_status() {
+        std::string resp = read_line();
+        if (resp.empty() || resp[0] != 'A') {
+            if (!resp.empty() && resp[0] == 'E') {
+                // Drain error message line
+                (void)read_line();
+            }
+            return -1;
+        }
+        try {
+            return std::stoll(resp.substr(1));
+        } catch (...) {
+            return -1;
+        }
+    }
+};
+
+// ── ArchiveStream: wraps a raw fd or rmt session, optionally via compressor ──
 
 class ArchiveStream {
 public:
@@ -312,13 +544,13 @@ public:
         if (use_stdin) {
             s.fd_ = STDIN_FILENO;
         } else if (is_remote_archive(cfg.archive_file, cfg.force_local)) {
-            // Remote archive via rmt protocol
-            int fd = open_remote_stream(cfg.archive_file, cfg.rsh_command, cfg.rmt_command, false);
-            if (fd < 0) return std::unexpected(msg_error(
+            // Remote archive via rmt protocol (seekable via L)
+            auto rmt = RmtSession::connect_and_open(
+                cfg.archive_file, cfg.rsh_command, cfg.rmt_command, O_RDONLY);
+            if (!rmt) return std::unexpected(msg_error(
                 std::format("cannot open remote archive '{}' for reading", cfg.archive_file)));
-            s.fd_ = fd;
-            s.owns_fd_ = true;
-            s.child_pid_ = -2; // sentinel: remote bridge (no waitpid needed here)
+            s.rmt_ = std::move(rmt);
+            s.child_pid_ = -2; // sentinel: rmt session owns the child
         } else {
             s.fd_ = ::open(cfg.archive_file.c_str(), O_RDONLY);
             if (s.fd_ < 0) return std::unexpected(sys_error(cfg.archive_file));
@@ -329,9 +561,9 @@ public:
         Compress comp = cfg.compress;
         if (comp == Compress::Auto) {
             comp = detect_compress(cfg.archive_file);
-            if (comp == Compress::None && s.owns_fd_)
+            if (comp == Compress::None && s.owns_fd_ && !s.rmt_)
                 comp = detect_compress_magic(s.fd_);
-        } else if (comp != Compress::None && s.owns_fd_) {
+        } else if (comp != Compress::None && s.owns_fd_ && !s.rmt_) {
             // When a specific compressor is requested, still verify the magic
             // bytes of the actual file and prefer them on a mismatch.  This
             // handles the common case where modern tools (e.g. system tar
@@ -343,6 +575,10 @@ public:
         }
 
         if (comp != Compress::None && comp != Compress::Auto) {
+            if (s.rmt_) {
+                return std::unexpected(msg_error(
+                    "compressed remote archives via rmt are not supported"));
+            }
             const char* prog = compress_prog_for(comp, cfg.compress_prog);
             if (!prog || !prog[0])
                 return std::unexpected(msg_error("unknown compression program"));
@@ -389,13 +625,14 @@ public:
         if (use_stdout) {
             s.fd_ = STDOUT_FILENO;
         } else if (is_remote_archive(cfg.archive_file, cfg.force_local)) {
-            // Remote archive via rmt protocol
-            int fd = open_remote_stream(cfg.archive_file, cfg.rsh_command, cfg.rmt_command, true);
-            if (fd < 0) return std::unexpected(msg_error(
+            // Remote create: O_WRONLY|O_CREAT|O_TRUNC via rmt
+            int flags = O_WRONLY | O_CREAT | O_TRUNC;
+            auto rmt = RmtSession::connect_and_open(
+                cfg.archive_file, cfg.rsh_command, cfg.rmt_command, flags);
+            if (!rmt) return std::unexpected(msg_error(
                 std::format("cannot open remote archive '{}' for writing", cfg.archive_file)));
-            s.fd_ = fd;
-            s.owns_fd_ = true;
-            s.child_pid_ = -2; // sentinel: remote bridge
+            s.rmt_ = std::move(rmt);
+            s.child_pid_ = -2; // sentinel: rmt session
         } else {
             int flags = O_WRONLY | O_CREAT | O_TRUNC;
             s.fd_ = ::open(cfg.archive_file.c_str(), flags, 0666);
@@ -404,6 +641,10 @@ public:
         }
 
         if (comp != Compress::None && comp != Compress::Auto) {
+            if (s.rmt_) {
+                return std::unexpected(msg_error(
+                    "compressed remote archives via rmt are not supported"));
+            }
             const char* prog = compress_prog_for(comp, cfg.compress_prog);
             if (!prog || !prog[0])
                 return std::unexpected(msg_error("unknown compression program"));
@@ -481,10 +722,9 @@ public:
 
         char buf[1 << 16];
         for (;;) {
-            ssize_t n = ::read(src.fd(), buf, sizeof(buf));
+            ssize_t n = src.read_buf(buf, sizeof(buf));
             if (n < 0) {
-                if (errno == EINTR) continue;
-                int e = errno;
+                int e = errno ? errno : EIO;
                 ::close(tfd);
                 ::unlink(tmpl);
                 return std::unexpected(Error{
@@ -520,6 +760,17 @@ public:
     // Open for read-write (append/update/delete — needs seekable archive)
     static Result<ArchiveStream> open_rdwr(const Config& cfg) {
         ArchiveStream s;
+        if (is_remote_archive(cfg.archive_file, cfg.force_local)) {
+            // Remote append/update: O_RDWR + rmt L (lseek) for end-of-archive
+            auto rmt = RmtSession::connect_and_open(
+                cfg.archive_file, cfg.rsh_command, cfg.rmt_command, O_RDWR);
+            if (!rmt) return std::unexpected(msg_error(
+                std::format("cannot open remote archive '{}' for update",
+                            cfg.archive_file)));
+            s.rmt_ = std::move(rmt);
+            s.child_pid_ = -2;
+            return s;
+        }
         s.fd_ = ::open(cfg.archive_file.c_str(), O_RDWR);
         if (s.fd_ < 0) return std::unexpected(sys_error(cfg.archive_file));
         s.owns_fd_ = true;
@@ -532,7 +783,8 @@ public:
     ArchiveStream& operator=(const ArchiveStream&) = delete;
     ArchiveStream(ArchiveStream&& o) noexcept
         : fd_(o.fd_), owns_fd_(o.owns_fd_), child_pid_(o.child_pid_),
-          patch_fd_(o.patch_fd_), patch_mtime_(o.patch_mtime_) {
+          patch_fd_(o.patch_fd_), patch_mtime_(o.patch_mtime_),
+          rmt_(std::move(o.rmt_)) {
         o.fd_ = -1; o.owns_fd_ = false; o.child_pid_ = -1;
         o.patch_fd_ = -1; o.patch_mtime_ = 0;
     }
@@ -541,6 +793,7 @@ public:
             close();
             fd_ = o.fd_; owns_fd_ = o.owns_fd_; child_pid_ = o.child_pid_;
             patch_fd_ = o.patch_fd_; patch_mtime_ = o.patch_mtime_;
+            rmt_ = std::move(o.rmt_);
             o.fd_ = -1; o.owns_fd_ = false; o.child_pid_ = -1;
             o.patch_fd_ = -1; o.patch_mtime_ = 0;
         }
@@ -558,6 +811,11 @@ public:
     ~ArchiveStream() { close(); }
 
     void close() {
+        if (rmt_) {
+            rmt_->close();
+            rmt_.reset();
+            child_pid_ = -1;
+        }
         if (owns_fd_ && fd_ >= 0) { ::close(fd_); fd_ = -1; owns_fd_ = false; }
         if (child_pid_ > 0) {
             int st = 0;
@@ -589,6 +847,7 @@ public:
 
     // Full-buffer reads (for block-aligned I/O)
     ssize_t read_buf(void* buf, std::size_t n) {
+        if (rmt_) return rmt_->read(buf, n);
         auto* p = static_cast<char*>(buf);
         std::size_t total = 0;
         while (total < n) {
@@ -601,6 +860,7 @@ public:
     }
 
     bool write_buf(const void* buf, std::size_t n) {
+        if (rmt_) return rmt_->write(buf, n);
         const auto* p = static_cast<const char*>(buf);
         std::size_t total = 0;
         while (total < n) {
@@ -612,11 +872,14 @@ public:
     }
 
     off_t seek(off_t pos, int whence = SEEK_SET) {
+        if (rmt_) return rmt_->seek(pos, whence);
         return ::lseek(fd_, pos, whence);
     }
 
     /// True when the underlying fd supports lseek and is not a compression pipe.
+    /// Remote rmt sessions are seekable via the L protocol command.
     [[nodiscard]] bool is_seekable() const noexcept {
+        if (rmt_) return true;
         if (fd_ < 0) return false;
         if (child_pid_ > 0) return false; // decompressor/compressor pipe
         errno = 0;
@@ -625,6 +888,7 @@ public:
     }
 
     bool truncate_at(off_t pos) {
+        if (rmt_) return false; // rmt has no ftruncate
         return ::ftruncate(fd_, pos) == 0;
     }
 
@@ -634,6 +898,7 @@ private:
     pid_t child_pid_ = -1;
     int   patch_fd_  = -1;       // dup of output fd for gzip mtime patching
     time_t patch_mtime_ = 0;     // archive creation time to embed in gzip header
+    std::unique_ptr<RmtSession> rmt_;
 };
 
 // ── Block buffer (blocking-factor–aligned I/O) ───────────────────────────────
@@ -1667,202 +1932,6 @@ static std::int64_t tape_max_blocks(const Config& cfg) {
 // ── Remote archive detection ──────────────────────────────────────────────────
 
 // Returns true if path looks like [user@]host:path and --force-local is not set.
-static bool is_remote_archive(const std::string& path, bool force_local) {
-    if (force_local) return false;
-    if (path.empty() || path == "-") return false;
-    auto colon = path.find(':');
-    if (colon == std::string::npos || colon == 0) return false;
-    // Make sure the part before ':' has no '/' (that would be a local path)
-    auto slash = path.find('/');
-    return slash == std::string::npos || slash > colon;
-}
-
-// Parse [user@]host:path → {user, host, path}  (user may be empty)
-static std::tuple<std::string,std::string,std::string> parse_remote_path(const std::string& s) {
-    auto colon = s.find(':');
-    std::string hostpart = s.substr(0, colon);
-    std::string path     = s.substr(colon + 1);
-    std::string user, host;
-    auto at = hostpart.find('@');
-    if (at != std::string::npos) { user = hostpart.substr(0, at); host = hostpart.substr(at + 1); }
-    else host = hostpart;
-    return {user, host, path};
-}
-
-// Open a remote archive via rmt protocol over rsh.
-// Returns a read or write fd (pipe end) on success, or -1 on failure.
-// mode: O_RDONLY (0) for read, O_WRONLY|O_CREAT|O_TRUNC (577) for write.
-static int open_remote_stream(const std::string& archive_file,
-                               const std::string& rsh_cmd_arg,
-                               const std::string& rmt_cmd_arg,
-                               bool for_write) {
-    auto [user, host, remote_path] = parse_remote_path(archive_file);
-    const std::string rsh_bin = rsh_cmd_arg.empty() ? "rsh" : rsh_cmd_arg;
-    const std::string rmt_bin = rmt_cmd_arg.empty() ? "rmt" : rmt_cmd_arg;
-
-    // We create two pipes for the rmt sub-process: one for data (our pipe) and
-    // one for the rsh/rmt communication.
-    // Topology for WRITE:
-    //   main-writes-to → data_pipe[1]
-    //   bridge reads data_pipe[0], sends W commands to rmt_pipe → rmt process
-    // Topology for READ:
-    //   bridge reads R responses from rmt_pipe → writes to data_pipe[1]
-    //   main reads from data_pipe[0]
-
-    int data_pipe[2];
-    if (::pipe(data_pipe) < 0) {
-        print(stderr, "mutar: pipe: {}\n", std::strerror(errno));
-        return -1;
-    }
-
-    pid_t bridge_pid = ::fork();
-    if (bridge_pid < 0) {
-        ::close(data_pipe[0]); ::close(data_pipe[1]);
-        print(stderr, "mutar: fork: {}\n", std::strerror(errno));
-        return -1;
-    }
-
-    if (bridge_pid == 0) {
-        // Bridge child process
-        int rmt_in[2], rmt_out[2];
-        if (::pipe(rmt_in) < 0 || ::pipe(rmt_out) < 0) ::_exit(1);
-
-        pid_t rsh_pid = ::fork();
-        if (rsh_pid < 0) ::_exit(1);
-        if (rsh_pid == 0) {
-            // rsh child: exec rsh host rmt
-            ::dup2(rmt_in[0],  STDIN_FILENO);
-            ::dup2(rmt_out[1], STDOUT_FILENO);
-            ::close(rmt_in[0]); ::close(rmt_in[1]);
-            ::close(rmt_out[0]); ::close(rmt_out[1]);
-            if (!user.empty())
-                ::execlp(rsh_bin.c_str(), rsh_bin.c_str(),
-                          "-l", user.c_str(), host.c_str(), rmt_bin.c_str(), nullptr);
-            else
-                ::execlp(rsh_bin.c_str(), rsh_bin.c_str(),
-                          host.c_str(), rmt_bin.c_str(), nullptr);
-            ::_exit(127);
-        }
-        ::close(rmt_in[0]); ::close(rmt_out[1]);
-        // rmt_in[1] = write to rmt stdin; rmt_out[0] = read rmt stdout
-
-        // Helper lambdas for rmt protocol I/O
-        auto rmt_write_cmd = [&](const std::string& cmd) -> bool {
-            const char* p = cmd.c_str();
-            std::size_t n = cmd.size();
-            while (n > 0) {
-                ssize_t w = ::write(rmt_in[1], p, n);
-                if (w <= 0) return false;
-                p += w; n -= static_cast<std::size_t>(w);
-            }
-            return true;
-        };
-        auto rmt_read_response = [&]() -> std::string {
-            std::string resp;
-            char c;
-            while (::read(rmt_out[0], &c, 1) == 1) {
-                resp += c;
-                if (c == '\n') break;
-            }
-            return resp;
-        };
-        auto rmt_read_bytes = [&](char* buf, std::size_t n) -> ssize_t {
-            std::size_t got = 0;
-            while (got < n) {
-                ssize_t r = ::read(rmt_out[0], buf + got, n - got);
-                if (r <= 0) return got == 0 ? r : static_cast<ssize_t>(got);
-                got += static_cast<std::size_t>(r);
-            }
-            return static_cast<ssize_t>(got);
-        };
-
-        // Send O command: O path\nmode\n
-        int open_mode = for_write ? (O_WRONLY | O_CREAT | O_TRUNC) : O_RDONLY;
-        std::string open_cmd = std::format("O {}\n{}\n", remote_path, open_mode);
-        if (!rmt_write_cmd(open_cmd)) {
-            std::fprintf(stderr, "mutar: rmt: failed to send open command\n");
-            ::close(rmt_in[1]); ::close(rmt_out[0]);
-            ::close(data_pipe[0]); ::close(data_pipe[1]);
-            ::_exit(1);
-        }
-        std::string resp = rmt_read_response();
-        if (resp.empty() || resp[0] != 'A') {
-            std::fprintf(stderr, "mutar: rmt: remote open failed: %s", resp.c_str());
-            ::close(rmt_in[1]); ::close(rmt_out[0]);
-            ::close(data_pipe[0]); ::close(data_pipe[1]);
-            ::_exit(1);
-        }
-
-        constexpr std::size_t RMT_CHUNK = 10240; // 20 blocks × 512
-        if (for_write) {
-            // Write bridge: read raw data from data_pipe[0], forward via W commands
-            ::close(data_pipe[1]);
-            char buf[RMT_CHUNK];
-            for (;;) {
-                ssize_t got = ::read(data_pipe[0], buf, sizeof(buf));
-                if (got <= 0) break;
-                std::string wcmd = std::format("W{}\n", got);
-                if (!rmt_write_cmd(wcmd)) break;
-                const char* p = buf;
-                std::size_t rem = static_cast<std::size_t>(got);
-                while (rem > 0) {
-                    ssize_t w = ::write(rmt_in[1], p, rem);
-                    if (w <= 0) goto write_done;
-                    p += w; rem -= static_cast<std::size_t>(w);
-                }
-                // Read A response
-                rmt_read_response();
-            }
-write_done:
-            ::close(data_pipe[0]);
-        } else {
-            // Read bridge: issue R commands, write data to data_pipe[1]
-            ::close(data_pipe[0]);
-            for (;;) {
-                std::string rcmd = std::format("R{}\n", RMT_CHUNK);
-                if (!rmt_write_cmd(rcmd)) break;
-                std::string aresp = rmt_read_response();
-                if (aresp.empty() || aresp[0] != 'A') break;
-                std::size_t nbytes = 0;
-                try {
-                    nbytes = static_cast<std::size_t>(std::stoul(aresp.substr(1)));
-                } catch (...) {
-                    break; // malformed rmt response — stop reading
-                }
-                if (nbytes == 0) break;
-                char rbuf[RMT_CHUNK];
-                ssize_t got = rmt_read_bytes(rbuf, nbytes);
-                if (got <= 0) break;
-                const char* p = rbuf;
-                std::size_t rem = static_cast<std::size_t>(got);
-                while (rem > 0) {
-                    ssize_t w = ::write(data_pipe[1], p, rem);
-                    if (w <= 0) goto read_done;
-                    p += w; rem -= static_cast<std::size_t>(w);
-                }
-            }
-read_done:
-            ::close(data_pipe[1]);
-        }
-
-        // Send C command to close remote file
-        rmt_write_cmd("C\n");
-        rmt_read_response();
-        ::close(rmt_in[1]); ::close(rmt_out[0]);
-        ::waitpid(rsh_pid, nullptr, 0);
-        ::_exit(0);
-    }
-
-    // Parent: return the appropriate pipe end
-    if (for_write) {
-        ::close(data_pipe[0]);
-        return data_pipe[1];  // parent writes here
-    } else {
-        ::close(data_pipe[1]);
-        return data_pipe[0];  // parent reads here
-    }
-}
-
 // Forward declarations of helpers used inside ArchiveWriter (defined later)
 static std::time_t parse_date_string(const std::string& s);
 static std::string apply_transform(const std::string& name, const std::string& expr);
@@ -4113,7 +4182,14 @@ static int op_list(const Config& cfg) {
 
     // Normalize user-supplied member names so "./file.txt" matches stored "file.txt"
     std::set<std::string> want;
-    for (const auto& f : cfg.files) want.insert(normalize_member(f));
+    std::vector<std::string> want_order;
+    std::size_t want_order_pos = 0;
+    for (const auto& f : cfg.files) {
+        std::string n = normalize_member(f);
+        want.insert(n);
+        if (cfg.preserve_order)
+            want_order.push_back(std::move(n));
+    }
 
     std::int64_t total_bytes = 0;
     std::int64_t checkpoint_count = 0;
@@ -4137,12 +4213,28 @@ static int op_list(const Config& cfg) {
             display_name = strip_components(display_name, cfg.strip_components);
             if (display_name.empty()) { reader.skip_entry(e); continue; }
         }
-        if (!want.empty() && !want.contains(e.name) && !want.contains(display_name)) {
-            if (cfg.show_omitted_dirs &&
-                (e.typeflag == DIRTYPE || (!e.name.empty() && e.name.back() == '/')))
-                print(stderr, "mutar: {}\n", e.name);
-            reader.skip_entry(e);
-            continue;
+        if (!want.empty()) {
+            bool selected = false;
+            if (cfg.preserve_order && !want_order.empty()) {
+                if (want_order_pos < want_order.size()) {
+                    const std::string& head = want_order[want_order_pos];
+                    std::string en = normalize_member(e.name);
+                    if (head == e.name || head == en || head == display_name ||
+                        head == normalize_member(display_name)) {
+                        selected = true;
+                        ++want_order_pos;
+                    }
+                }
+            } else {
+                selected = want.contains(e.name) || want.contains(display_name);
+            }
+            if (!selected) {
+                if (cfg.show_omitted_dirs &&
+                    (e.typeflag == DIRTYPE || (!e.name.empty() && e.name.back() == '/')))
+                    print(stderr, "mutar: {}\n", e.name);
+                reader.skip_entry(e);
+                continue;
+            }
         }
         // --occurrence: only process the Nth occurrence of a member name
         if (cfg.occurrence > 0) {
@@ -4704,7 +4796,15 @@ static int op_extract(const Config& cfg) {
 
     // Normalize user-supplied member names so "./file.txt" matches stored "file.txt"
     std::set<std::string> want;
-    for (const auto& f : cfg.files) want.insert(normalize_member(f));
+    // Ordered list for -s/--preserve-order/--same-order (GNU single-pass semantics)
+    std::vector<std::string> want_order;
+    std::size_t want_order_pos = 0;
+    for (const auto& f : cfg.files) {
+        std::string n = normalize_member(f);
+        want.insert(n);
+        if (cfg.preserve_order)
+            want_order.push_back(std::move(n));
+    }
 
     // Optional sidecar index for selective extract via seek
     ArchiveIndex extract_index;
@@ -4729,7 +4829,7 @@ static int op_extract(const Config& cfg) {
     // named members, materialise decompressed bytes to a temp file so seek
     // extract works for .tar.xz / .tar.zst / etc. (full decompress once).
     const bool want_seek =
-        have_index && !want.empty() && !s.is_seekable();
+        have_index && !want.empty() && !s.is_seekable() && !cfg.preserve_order;
     if (want_seek) {
         std::string materialize_temp;
         auto mat = ArchiveStream::materialize_seekable(s, materialize_temp);
@@ -4832,10 +4932,11 @@ static int op_extract(const Config& cfg) {
     };
 
     // Seek-based selective extract when index + seekable stream + named members.
+    // Disabled with --preserve-order: must honour archive order vs want-list order.
     std::vector<IndexEntry> seek_queue;
     bool use_index_seek = false;
     std::size_t seek_qi = 0;
-    if (have_index && !want.empty() && s.is_seekable()) {
+    if (have_index && !want.empty() && s.is_seekable() && !cfg.preserve_order) {
         for (const auto& ie : extract_index.all()) {
             std::string n = normalize_member(ie.name);
             if (want.contains(ie.name) || want.contains(n))
@@ -4893,9 +4994,29 @@ static int op_extract(const Config& cfg) {
         if (!one_top.empty() && outpath != "." && outpath != "./")
             outpath = one_top + "/" + outpath;
 
-        if (!want.empty() && !want.contains(e.name) && !want.contains(outpath)) {
-            reader.skip_entry(e);
-            continue;
+        // Member selection: set match, or ordered single-pass with -s
+        if (!want.empty()) {
+            bool selected = false;
+            if (cfg.preserve_order && !want_order.empty()) {
+                // GNU --same-order: only the current head of the want-list matches.
+                // Non-matching archive members are skipped; head advances on match.
+                if (want_order_pos < want_order.size()) {
+                    const std::string& head = want_order[want_order_pos];
+                    std::string en = normalize_member(e.name);
+                    if (head == e.name || head == en || head == outpath ||
+                        head == normalize_member(outpath)) {
+                        selected = true;
+                        ++want_order_pos;
+                    }
+                }
+            } else {
+                selected = want.contains(e.name) || want.contains(outpath) ||
+                           want.contains(normalize_member(e.name));
+            }
+            if (!selected) {
+                reader.skip_entry(e);
+                continue;
+            }
         }
         // --occurrence: only process the Nth occurrence of a member name
         if (cfg.occurrence > 0) {
@@ -5353,6 +5474,19 @@ static int op_extract(const Config& cfg) {
         }
     }
 
+    // Report members requested but not found (especially with --preserve-order)
+    if (!want.empty()) {
+        if (cfg.preserve_order && !want_order.empty()) {
+            for (std::size_t i = want_order_pos; i < want_order.size(); ++i) {
+                print(stderr, "mutar: {}: Not found in archive\n", want_order[i]);
+                exit_code = EXIT_FAILURE;
+            }
+        } else {
+            // Non-order mode: we do not track found-set today; skip bulk notfound
+            // to avoid false positives for directory recursion / wildcards.
+        }
+    }
+
     // Fix up directory timestamps (apply in reverse order)
     for (auto it = dir_fixups.rbegin(); it != dir_fixups.rend(); ++it) {
         if (!cfg.touch) {
@@ -5434,7 +5568,7 @@ static int op_diff(const Config& cfg) {
 
 static int op_append(const Config& cfg) {
     // Find end of archive, then write new entries
-    // The archive must be seekable (no compression)
+    // The archive must be seekable (no compression); remote uses rmt L.
     auto res = ArchiveStream::open_rdwr(cfg);
     if (!res) {
         print(stderr, "mutar: {}\n", res.error().message);
@@ -5457,11 +5591,22 @@ static int op_append(const Config& cfg) {
     // We want to overwrite the first zero block.
     off_t write_pos = (reader.block_no() - 2) * static_cast<off_t>(BLOCKSIZE);
     if (write_pos < 0) write_pos = 0;
-    s.seek(write_pos);
+    if (s.seek(write_pos) < 0) {
+        print(stderr, "mutar: cannot seek to end of archive for append\n");
+        return EXIT_FAILURE;
+    }
 
     Format fmt = cfg.fmt;
     if (fmt == Format::Default) fmt = Format::GNU;
     ArchiveWriter writer(s, cfg.blocking_factor, fmt);
+
+    // -C applies to member paths after the archive is open
+    if (!cfg.directory.empty()) {
+        if (::chdir(cfg.directory.c_str()) < 0) {
+            print(stderr, "mutar: -C {}: {}\n", cfg.directory, std::strerror(errno));
+            return EXIT_FAILURE;
+        }
+    }
 
     int exit_code = EXIT_SUCCESS;
     for (const auto& f : cfg.files) {
@@ -5497,11 +5642,14 @@ static int op_update(const Config& cfg) {
         }
     }
 
-    // Build list of files newer than archived version
+    // Build list of files newer than archived version (-C prefixes local paths)
     std::vector<std::string> to_append;
     for (const auto& f : cfg.files) {
+        std::string fspath = f;
+        if (!cfg.directory.empty() && fspath[0] != '/')
+            fspath = cfg.directory + "/" + f;
         struct stat st{};
-        if (::stat(f.c_str(), &st) < 0) continue;
+        if (::stat(fspath.c_str(), &st) < 0) continue;
         auto it = archive_mtimes.find(f);
         if (it == archive_mtimes.end() || st.st_mtime > it->second)
             to_append.push_back(f);
@@ -6119,7 +6267,6 @@ static Config parse_args(int argc, char* argv[]) {
         case 'p': cfg.same_permissions  = true; break;
         case 's':
             cfg.preserve_order = true;
-            print(stderr, "mutar: warning: --preserve-order/-s is not yet implemented; option accepted but ignored\n");
             break;
         case 'm': cfg.touch             = true; break;
         case 'S': cfg.sparse            = true; break;
@@ -6385,7 +6532,6 @@ static Config parse_args(int argc, char* argv[]) {
             // GNU: --preserve = -p + -s
             cfg.same_permissions = true;
             cfg.preserve_order = true;
-            // preserve-order full extract behaviour is Phase 7; flag is stored
             break;
         case OPT_QUOTE_CHARS:
             if (::optarg)
@@ -6762,7 +6908,7 @@ static void print_usage(const char* prog) {
         "      --owner-map=FILE            Use FILE to map file owner UIDs\n"
         "  -p, --preserve-permissions, --same-permissions  Extract information about file permissions\n"
         "      --preserve                  Same as both -p and -s\n"
-        "  -s, --preserve-order, --same-order  Member arguments listed in archive order (flag stored; full extract Phase 7)\n"
+        "  -s, --preserve-order, --same-order  Member arguments listed in the same order as the archive\n"
         "      --same-owner                Try extracting files with the same ownership as exists in the archive\n"
         "      --sort=ORDER                Directory sorting order: none (default), name or inode\n",
         prog);
@@ -6796,7 +6942,7 @@ static void print_usage(const char* prog) {
         "                                  between-member rotation only (no mid-file split)\n"
         "  -M, --multi-volume              Create/list/extract multi-volume archive\n"
         "      --rmt-command=COMMAND       Use given rmt COMMAND instead of rmt\n"
-        "                                  (O/R/W/C only; rmt lseek/S and remote append not supported)\n"
+        "                                  (O/R/W/L/C; L=lseek enables remote -r/-u)\n"
         "      --rsh-command=COMMAND       Use remote COMMAND instead of rsh\n"
         "      --volno-file=F              Read/write current volume number in F (atomic)\n"
         "\nDevice blocking:\n"

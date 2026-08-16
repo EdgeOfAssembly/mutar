@@ -152,7 +152,7 @@ Legend:
 | `-U` / `--unlink-first` | ✅ | |
 | `--recursive-unlink` | ✅ | |
 | `--no-overwrite-dir` | ✅ | PR #172: skips dir mtime/mode fixup when target exists |
-| `-s` / `--preserve-order` / `--same-order` | ⚠️ | Flag stored; full extract order constraint is Phase 7; `-s` still warns |
+| `-s` / `--preserve-order` / `--same-order` | ✅ | Phase 7: single-pass ordered want-list on extract/list; Not found for missed members |
 | `--preserve` | ✅ | Phase 1: longopt sets `-p` + `-s` flags |
 | `-p` / `--preserve-permissions` | ✅ | |
 | `--delay-directory-restore` | ✅ | |
@@ -225,8 +225,8 @@ Legend:
 
 | Option | Status | Notes |
 |--------|--------|-------|
-| `--rsh-command=CMD` | 🔧 | PR #172: remote filename detection and rmt protocol bridge via rsh fork/pipe implemented |
-| `--rmt-command=CMD` | 🔧 | PR #172: used with rsh bridge; rmt O/R/W/C protocol commands implemented |
+| `--rsh-command=CMD` | ✅ | rsh (or mock) launches rmt; used with host:path archives |
+| `--rmt-command=CMD` | ✅ | rmt O/R/W/L/C; L=lseek; remote -r/-u; mock in tests/mock_rmt.py |
 
 ### Sorting & Other
 
@@ -315,7 +315,7 @@ entries. The `cfg.checkpoint_action` value selects output:
 When `cfg.full_time` is set, the listing path in `op_list()` formats the
 mtime as `YYYY-MM-DD HH:MM:SS.NNNNNNNNN` instead of the default truncated form.
 
-### 10. `-s` / `--preserve-order` (partial / no-op)
+### 10. `-s` / `--preserve-order` (implemented — Phase 7)
 
 The `cfg.preserve_order` flag is parsed and stored. The option **emits a
 "not implemented" warning** when used. It is **not yet consulted** by
@@ -506,7 +506,7 @@ forks a bridge child that runs `rsh host rmt`, opens the remote file with
 `R count\n` + `A len\ndata` (read) rmt commands. The bridge fd becomes the
 ArchiveStream's fd, making it transparent to the rest of the code.
 
-**Limitation**: `lseek` over rmt (the `S` command) is not implemented.
+**Implemented (Phase 6)**: rmt `L` (lseek) + remote append/update. Note: protocol letter is `L` (GNU/BSD); `S` is status/ioctl.
 Append/update operations on remote archives are not supported.
 
 ### 6. `--warning=KEYWORD` wiring
@@ -582,7 +582,7 @@ compatibility.
 | `-G` / `-g` (incremental) | `listed_incremental`, `incremental` | ✅ Phase 3: dumpdir create/extract (`-G`); listed-incremental skip for files/symlinks/specials; dirs always dumped; snapshot V2 |
 | `--exclude-ignore` / `--exclude-ignore-recursive` | `exclude_ignore`, `exclude_ignore_recursive` | ✅ Phase 2: per-directory ignore files (not global `-X`) |
 | `-M` (multi-volume) | `multi_volume` | ✅ Phase 5: between-member + mid-file `GNUTYPE_MULTIVOL` split/reassemble |
-| `--rsh-command` / `--rmt-command` | `rsh_command`, `rmt_command` | 🔧 PR #172: rmt bridge via rsh fork+pipe; O/R/W/C protocol implemented. **Limitation (G11):** rmt `lseek`/`S` and remote append not implemented (documented in `--help`) |
+| `--rsh-command` / `--rmt-command` | `rsh_command`, `rmt_command` | ✅ Phase 6: rmt O/R/W/L/C in-process session; L=lseek; remote -r/-u; tests/mock_rmt.py |
 | PAX sparse write format | `fmt_` | ✅ PR #172: when `--format=pax`, GNU.sparse.* PAX keywords emitted; GNU.sparse.map parsed on read |
 | `--warning=KEYWORD` | `warnings_enabled/disabled` | ✅ PR #172: `mutar_warn()` helper implemented and wired at key emission sites |
 | `--overwrite-dir` / `--no-overwrite-dir` | `overwrite_dir`, `no_overwrite_dir` | ✅ PR #172: DIRTYPE case in op_extract checks existing path and skips fixup when --no-overwrite-dir |
@@ -660,7 +660,7 @@ Key interop checks in `run_tests.sh`:
 | G12 | `--quoting-style` | ✅ Implemented | + Phase 1: `shell-escape`, `shell-escape-always`, `locale`, `clocale` |
 | G14 | `--check-device` | ✅ Implemented | `Config::check_device` default true; snapshot V2 stores `st_dev`; re-archive when device changes |
 | G10 | Incremental dirs | ✅ Phase 3 | Snapshot records dirs+specials; skip filter covers files/symlinks/specials; dirs always dumped |
-| G11 | rmt lseek | 📄 Documented only | Help + this file: rmt `S`/lseek and remote append not supported |
+| G11 | rmt lseek | ✅ Phase 6 | rmt `L` (lseek) + remote -r/-u; protocol tests via mock_rmt |
 
 **Tests:** `tests/test_phase_e.sh` (CTest `mutar_phase_e_tests`).
 
@@ -711,7 +711,7 @@ Previously both long options were miswired to `OPT_EXCLUDE_FROM` (global pattern
 
 **GNU interop:** system `tar -tf` lists mutar `-G` archives. Full GNU `-G` extract purge interop not claimed as a hard gate; mutar↔mutar dumpdir round-trip + purge tested.
 
-**Not claimed:** rmt lseek, full GNU binary snapshot format for `-g` (mutar keeps MUTAR_SNAPSHOT_V2).
+**Not claimed:** full GNU binary snapshot format for `-g` (mutar keeps MUTAR_SNAPSHOT_V2); compressed remote rmt archives.
 
 **Tests:** `tests/test_phase2_3_parity.sh` (CTest `mutar_phase2_3_parity_tests`).
 **Build:** Debug + ASan + UBSan.
@@ -744,6 +744,20 @@ Previously both long options were miswired to `OPT_EXCLUDE_FROM` (global pattern
 **Build:** Debug + ASan + UBSan.
 
 ---
+
+## GOAL_GNU_PARITY Phase 6–7 — rmt L + preserve-order (2026-08-16)
+
+| Item | Status | Evidence |
+|------|--------|----------|
+| rmt `L` (lseek) | ✅ | `RmtSession::seek` → `Lwhence\noffset\n`; mock protocol test P6-01 |
+| Remote create/list/extract | ✅ | mock_rsh + mock_rmt; P6-02/03 |
+| Remote `-r` / `-u` | ✅ | `open_rdwr` remote + seek to EOA; P6-04/05 |
+| `-s` / `--preserve-order` / `--same-order` | ✅ | Ordered want-list extract/list; P7-01..06 |
+| `--preserve` | ✅ | Sets -p + -s; P7-05 |
+
+**Note:** GNU/BSD rmt lseek command letter is **`L`** (not `S`; `S` is status). Compressed remote archives remain unsupported.
+
+**Tests:** `tests/test_phase6_7_parity.sh` → ctest `mutar_phase6_7_parity_tests`.
 
 ## GOAL_GNU_PARITY Phase 5 — mid-file multi-volume (G1.6) (2026-08-16)
 

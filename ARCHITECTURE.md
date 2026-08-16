@@ -213,7 +213,7 @@ process and reading `#1 in mutar::pax_append` directly from the backtrace.
 
 - **xattrs / ACLs**: store/restore via PAX `SCHILY.xattr.*` / `SCHILY.acl.*` when `MUTAR_HAVE_XATTR` / `MUTAR_HAVE_ACL`; SELinux never stored
 - **Incremental backups** (`-G -g`): `--level=0` done; full snapshot state file not yet maintained
-- **Remote tape** (`--rsh/rmt-command`): `rmt` protocol not wired
+- **Remote tape** (`--rsh/rmt-command`): rmt O/R/W/L/C (L=lseek); remote append
 - **Multi-volume** (`-M -L`): between-member rotation + mid-file split via
   `GNUTYPE_MULTIVOL` (`'M'`) with oldgnu offset field; extract reassembly
 - **PAX sparse write**: sparse data currently written as GNU 'S' format only; PAX extended-header sparse map format not yet emitted
@@ -236,7 +236,7 @@ PR #170 added the following fields to the `Config` struct:
 | `interactive` | `bool` | `--interactive` / `--confirmation` — per-file prompts |
 | `show_transformed_names` | `bool` | `--show-transformed-names` — print original → new name |
 | `overwrite_dir` | `bool` | `--overwrite-dir` — replace existing directories on extract |
-| `preserve_order` | `bool` | `-s` / `--preserve-order` — skip sorting in create |
+| `preserve_order` | `bool` | `-s` / `--preserve-order` — ordered want-list on extract/list |
 | `full_time` | `bool` | `--full-time` — nanosecond timestamps in `--list` |
 | `hole_detection` | `std::string` | `--hole-detection=seek\|raw` — sparse detection mode |
 | `level` | `int` | `--level=N` — incremental level (0 = full snapshot) |
@@ -330,7 +330,7 @@ The following options are **accepted and parsed but not yet behaviorally wired**
 
 | Option | Status |
 |--------|--------|
-| `-s` / `--preserve-order` | Flag stored; emits a "not implemented" warning; directory ordering is controlled only by `--sort` |
+| `-s` / `--preserve-order` | Extract/list: ordered want-list (GNU same-order); create dir order still via `--sort` |
 | `--overwrite-dir` / `--no-overwrite-dir` | ✅ PR #172: fully wired in DIRTYPE extraction case |
 | `--warning=KEYWORD` | ✅ PR #172: `mutar_warn()` helper wired at key emission sites |
 
@@ -371,17 +371,16 @@ The snapshot format is line-oriented (`name<TAB>mtime_sec`) with a
 ### Remote archive (rmt) bridge
 
 `is_remote_archive()` detects `[user@]host:path` in `cfg.archive_file`.
-`open_remote_stream()` forks a bridge child that:
-1. Forks `rsh [user@]host rmt` as a sub-child.
-2. Sends `O path mode\n` and reads the `A 0\n` response.
-3. For write: reads raw bytes from a pipe, sends `W count\ndata`, reads `A`.
-4. For read: sends `R count\n`, reads `A len\ndata`, writes to a pipe.
-5. Sends `C\n` on EOF/close.
+`RmtSession` speaks the rmt protocol in-process over pipes to `rsh host rmt`:
 
-The pipe fd returned becomes `ArchiveStream::fd_`, so the rest of the code
-sees it as a normal byte stream. The bridge child is tracked like the
-compression child (reused `child_pid_` sentinel `-2` for remote bridges that
-don't require `waitpid`).
+1. Forks `rsh [user@]host rmt` (or `--rsh-command` / `--rmt-command`).
+2. `O<path>\n<flags>\n` open (decimal open(2) flags).
+3. `R`/`W` for block I/O; **`L<whence>\n<offset>\n` for lseek** (enables remote `-r`/`-u`).
+4. `C\n` on close.
+
+`ArchiveStream` holds `unique_ptr<RmtSession>` and routes `read_buf` / `write_buf` /
+`seek` through it. Remote streams report `is_seekable() == true`. Compressed
+remote archives are rejected. Tests use `tests/mock_rsh.sh` + `tests/mock_rmt.py`.
 
 ### Warning emission system
 

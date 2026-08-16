@@ -249,6 +249,13 @@ add_test(
   WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
 )
 
+# GOAL_GNU_PARITY Phases 6–7: rmt L/lseek + remote append, -s/--preserve-order
+add_test(
+  NAME mutar_phase6_7_parity_tests
+  COMMAND bash ${CMAKE_SOURCE_DIR}/tests/test_phase6_7_parity.sh $<TARGET_FILE:mutar>
+  WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+)
+
 # Phase F G17: index/seek micro-benchmark smoke (always passes; not a fail gate)
 # Full numbers: BENCH_MEMBERS=2000 bash tests/bench_index_seek.sh build/mutar
 add_test(
