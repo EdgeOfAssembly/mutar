@@ -65,6 +65,7 @@ mutar [OPTION...] [FILE...]
 | `-S` | Handle sparse files |
 | `--write-index` | Write sidecar member index (`ARCHIVE.mutaridx`) |
 | `--mutar-index=FILE` | Explicit index path (create/list/extract) |
+| `--seekable` | Seek-friendly xz/zstd blocks; implies index; compressed extract materializes then seeks |
 | `-H FORMAT` | Archive format: `v7` `oldgnu` `gnu` `ustar` `pax` |
 | `--strip-components=N` | Strip N leading components from paths on extract |
 | `--exclude=PATTERN` | Exclude files matching PATTERN |

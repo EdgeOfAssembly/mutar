@@ -277,6 +277,7 @@ struct Config {
     std::string index_file;              // --index-file (GNU: verbose routing)
     std::string mutar_index;             // --mutar-index=PATH (sidecar index R/W)
     bool        write_index = false;     // --write-index (create sidecar *.mutaridx)
+    bool        seekable    = false;     // --seekable (index + seek-friendly compress)
     std::string starting_file;           // -K / --starting-file
     std::vector<std::string> exclude_from; // -X / --exclude-from (filenames)
     bool   anchored            = false;  // --anchored/--no-anchored (GNU tar default: --no-anchored)

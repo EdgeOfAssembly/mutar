@@ -247,6 +247,17 @@ public:
             if (!prog || !prog[0])
                 return std::unexpected(msg_error("unknown compression program"));
 
+            // --seekable: prefer multi-block xz / chunked zstd; warn for solid gzip/bzip2.
+            if (cfg.seekable) {
+                if (comp == Compress::Gzip || comp == Compress::Bzip2 ||
+                    comp == Compress::CompressZ || comp == Compress::Lzop) {
+                    print(stderr,
+                          "mutar: warning: --seekable with {} still needs full "
+                          "decompress for random access (solid stream)\n",
+                          prog);
+                }
+            }
+
             int pipefd[2];
             if (::pipe(pipefd) < 0) return std::unexpected(sys_error("pipe"));
 
@@ -271,12 +282,20 @@ public:
             if (pid < 0) { ::close(pipefd[0]); ::close(pipefd[1]);
                            return std::unexpected(sys_error("fork")); }
             if (pid == 0) {
-                // Child: prog < pipefd[0] > s.fd_
+                // Child: prog [seekable-args] < pipefd[0] > s.fd_
                 ::dup2(pipefd[0], STDIN_FILENO);
                 ::dup2(s.fd_, STDOUT_FILENO);
                 ::close(pipefd[1]);
                 if (s.owns_fd_) ::close(s.fd_);
-                ::execlp(prog, prog, nullptr);
+                if (cfg.seekable && comp == Compress::Xz) {
+                    // Multi-block stream with index (xz -l shows Blocks > 1).
+                    ::execlp(prog, prog, "--block-size=1MiB", nullptr);
+                } else if (cfg.seekable && comp == Compress::Zstd) {
+                    // Independent multi-thread chunks (~1 MiB) for better locality.
+                    ::execlp(prog, prog, "-T0", "-B1M", nullptr);
+                } else {
+                    ::execlp(prog, prog, nullptr);
+                }
                 ::_exit(127);
             }
             ::close(pipefd[0]);
@@ -286,6 +305,55 @@ public:
             s.child_pid_ = pid;
         }
         return s;
+    }
+
+    /// Drain a (possibly decompressed) stream into a temp file and return a
+    /// seekable ArchiveStream on that file. Used so index-based seek works for
+    /// compressed archives (full decompress once, then random access).
+    static Result<ArchiveStream> materialize_seekable(ArchiveStream& src,
+                                                      std::string& temp_path_out) {
+        char tmpl[] = "/tmp/mutar_seek_XXXXXX";
+        int tfd = ::mkstemp(tmpl);
+        if (tfd < 0)
+            return std::unexpected(sys_error("mkstemp for seek materialize"));
+        temp_path_out = tmpl;
+
+        char buf[1 << 16];
+        for (;;) {
+            ssize_t n = ::read(src.fd(), buf, sizeof(buf));
+            if (n < 0) {
+                if (errno == EINTR) continue;
+                int e = errno;
+                ::close(tfd);
+                ::unlink(tmpl);
+                return std::unexpected(Error{
+                    std::format("materialize read: {}", std::strerror(e)), e});
+            }
+            if (n == 0) break;
+            std::size_t off = 0;
+            while (off < static_cast<std::size_t>(n)) {
+                ssize_t w = ::write(tfd, buf + off, static_cast<std::size_t>(n) - off);
+                if (w < 0) {
+                    if (errno == EINTR) continue;
+                    int e = errno;
+                    ::close(tfd);
+                    ::unlink(tmpl);
+                    return std::unexpected(Error{
+                        std::format("materialize write: {}", std::strerror(e)), e});
+                }
+                off += static_cast<std::size_t>(w);
+            }
+        }
+        // Close source (waits for decompressor child if any)
+        src.close();
+        if (::lseek(tfd, 0, SEEK_SET) < 0) {
+            int e = errno;
+            ::close(tfd);
+            ::unlink(tmpl);
+            return std::unexpected(Error{
+                std::format("materialize lseek: {}", std::strerror(e)), e});
+        }
+        return adopt_fd(tfd);
     }
 
     // Open for read-write (append/update/delete — needs seekable archive)
@@ -306,6 +374,24 @@ public:
           patch_fd_(o.patch_fd_), patch_mtime_(o.patch_mtime_) {
         o.fd_ = -1; o.owns_fd_ = false; o.child_pid_ = -1;
         o.patch_fd_ = -1; o.patch_mtime_ = 0;
+    }
+    ArchiveStream& operator=(ArchiveStream&& o) noexcept {
+        if (this != &o) {
+            close();
+            fd_ = o.fd_; owns_fd_ = o.owns_fd_; child_pid_ = o.child_pid_;
+            patch_fd_ = o.patch_fd_; patch_mtime_ = o.patch_mtime_;
+            o.fd_ = -1; o.owns_fd_ = false; o.child_pid_ = -1;
+            o.patch_fd_ = -1; o.patch_mtime_ = 0;
+        }
+        return *this;
+    }
+
+    /// Adopt an already-open fd (e.g. materialised temp archive).
+    static ArchiveStream adopt_fd(int fd) {
+        ArchiveStream s;
+        s.fd_ = fd;
+        s.owns_fd_ = true;
+        return s;
     }
 
     ~ArchiveStream() { close(); }
@@ -2483,9 +2569,10 @@ static int op_create(const Config& cfg) {
 
     ArchiveWriter writer(s, cfg.blocking_factor, fmt);
 
-    // Optional sidecar index collection (--write-index / --mutar-index on create)
+    // Optional sidecar index collection (--write-index / --mutar-index / --seekable)
     ArchiveIndex create_index;
-    const bool collect_index = cfg.write_index || !cfg.mutar_index.empty();
+    const bool collect_index =
+        cfg.write_index || !cfg.mutar_index.empty() || cfg.seekable;
     if (collect_index)
         writer.set_index(&create_index);
 
@@ -2818,8 +2905,9 @@ static int op_extract(const Config& cfg) {
         print(stderr, "mutar: {}\n", res.error().message);
         return EXIT_FAILURE;
     }
-    ArchiveStream& s = *res;
-    ArchiveReader reader(s, cfg.blocking_factor, cfg.ignore_zeros);
+    ArchiveStream s = std::move(*res);
+    std::string materialize_temp;
+    bool unlink_materialize = false;
 
     if (!cfg.index_file.empty()) {
         g_index_fp = std::fopen(cfg.index_file.c_str(), "w");
@@ -2850,9 +2938,32 @@ static int op_extract(const Config& cfg) {
         }
     }
 
+    // Compressed streams are pipes (not seekable). When we have an index and
+    // named members, materialise decompressed bytes to a temp file so seek
+    // extract works for .tar.xz / .tar.zst / etc. (full decompress once).
+    const bool want_seek =
+        have_index && !want.empty() && !s.is_seekable();
+    if (want_seek) {
+        auto mat = ArchiveStream::materialize_seekable(s, materialize_temp);
+        if (!mat) {
+            print(stderr, "mutar: cannot materialize seekable view: {}\n",
+                  mat.error().message);
+            return EXIT_FAILURE;
+        }
+        s = std::move(*mat);
+        unlink_materialize = true;
+        if (std::getenv("MUTAR_DEBUG_SEEK"))
+            print(stderr, "mutar: materialized compressed archive to {} for seek\n",
+                  materialize_temp);
+    }
+
+    ArchiveReader reader(s, cfg.blocking_factor, cfg.ignore_zeros);
+
     if (!cfg.directory.empty()) {
         if (::chdir(cfg.directory.c_str()) < 0) {
             print(stderr, "mutar: -C {}: {}\n", cfg.directory, std::strerror(errno));
+            if (unlink_materialize && !materialize_temp.empty())
+                ::unlink(materialize_temp.c_str());
             return EXIT_FAILURE;
         }
     }
@@ -3311,6 +3422,9 @@ static int op_extract(const Config& cfg) {
 
     if (g_index_fp) { std::fclose(g_index_fp); g_index_fp = nullptr; }
 
+    if (unlink_materialize && !materialize_temp.empty())
+        ::unlink(materialize_temp.c_str());
+
     return exit_code;
 }
 
@@ -3698,6 +3812,7 @@ enum LongOptVal : int {
     OPT_INDEX_FILE,
     OPT_WRITE_INDEX,
     OPT_MUTAR_INDEX,
+    OPT_SEEKABLE,
     OPT_RESTRICT,
     OPT_SPARSE,
     OPT_INTERACTIVE,
@@ -3905,6 +4020,7 @@ static const struct option long_opts[] = {
     {"index-file",       required_argument, nullptr, OPT_INDEX_FILE},
     {"write-index",      no_argument,       nullptr, OPT_WRITE_INDEX},
     {"mutar-index",      required_argument, nullptr, OPT_MUTAR_INDEX},
+    {"seekable",         no_argument,       nullptr, OPT_SEEKABLE},
     {"show-omitted-dirs",no_argument,       nullptr, OPT_SHOW_OMITTED_DIRS},
     {"show-transformed-names",no_argument,  nullptr, OPT_SHOW_TRANSFORMED},
     {"show-stored-names",no_argument,       nullptr, OPT_SHOW_TRANSFORMED},
@@ -4260,6 +4376,11 @@ static Config parse_args(int argc, char* argv[]) {
             // Presence of mutar_index alone enables index write on create.
             cfg.mutar_index = ::optarg ? ::optarg : "";
             break;
+        case OPT_SEEKABLE:
+            cfg.seekable = true;
+            // Seekable archives are most useful with a sidecar index.
+            cfg.write_index = true;
+            break;
         case OPT_EXCLUDE_FROM:       cfg.exclude_from.emplace_back(::optarg); break;
         case OPT_COMPRESS:           cfg.compress = Compress::CompressZ; break;
         case OPT_NO_RECURSION:       cfg.no_recursion = true; break;
@@ -4575,6 +4696,8 @@ static void print_usage(const char* prog) {
         "      --index-file=FILE           Send verbose output to FILE\n"
         "      --write-index               Write sidecar member index (ARCHIVE.mutaridx) on create\n"
         "      --mutar-index=FILE          Sidecar index path (create write / list+extract read)\n"
+        "      --seekable                  Prefer seek-friendly compress (xz/zstd blocks); implies --write-index\n"
+        "                                  Compressed extract materializes once then seeks via index\n"
         "      --no-quote-chars=STRING     Disable quoting for characters from STRING\n"
         "      --quote-chars=STRING        Additionally quote characters from STRING\n"
         "      --quoting-style=STYLE       Set name quoting style\n"

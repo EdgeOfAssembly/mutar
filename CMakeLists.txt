@@ -191,6 +191,13 @@ add_test(
   WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
 )
 
+# Seekable compression (Phase 6)
+add_test(
+  NAME mutar_seekable_compress_tests
+  COMMAND bash ${CMAKE_SOURCE_DIR}/tests/test_seekable_compress.sh $<TARGET_FILE:mutar>
+  WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+)
+
 # Boundary / overflow / memory tests binary
 # Compiled with AddressSanitizer + UndefinedBehaviorSanitizer so any OOB
 # access, integer overflow, use-after-free, etc. are caught at runtime.
