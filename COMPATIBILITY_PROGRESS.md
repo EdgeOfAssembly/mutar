@@ -771,3 +771,26 @@ Previously both long options were miswired to `OPT_EXCLUDE_FROM` (global pattern
 
 **Tests:** `tests/test_multi_volume.sh` (CTest `mutar_multi_volume_tests`) — T-MVOL-BIG, T-MVOL-BIG-GNU, T-MVOL-MIX, T-MVOL-VOLNO-BIG + prior between-member cases.
 **Build:** Debug + ASan + UBSan; full ctest green.
+
+---
+
+## GOAL_GNU_PARITY Phase 8 — honesty + residual pure no-ops (2026-08-17)
+
+Phase 8 parity re-audit (`$TMPDIR/grok-$(id -u)/mutar/parity/phase8-parity-report.md`): **NO**
+(full YES blocked by deeper interop / partials). Quick residual fixes applied:
+
+| Item | Status | Notes |
+|------|--------|-------|
+| Help `-L` mid-file | ✅ | Documents mid-file type `M` (was underclaiming) |
+| Help `-g` skip filter | ✅ | files/symlinks/specials; dirs always dumped |
+| Help missing longopts | ✅ | `-m/--touch`, `-h/--dereference`, `--hard-dereference`, `-l/--check-links`, `--ignore-case` |
+| G0.1 / G1.1–G1.17 checklist | ✅ | Marked done in `GOAL_GNU_PARITY.md` §10 |
+| `-B` / `--read-full-records` | ✅ | Reblock short pipe reads to full record in `BlockBuffer::fill` |
+| `-n` / `--seek` / `--no-seek` | ✅ | `is_seekable(cfg.seek)` gates index seek / materialize |
+| `--sort=inode` | ✅ | Directory walk sorts by `st_ino` then name |
+| `--delay-directory-restore` | ✅ | GNU polarity: default immediate; delay only when flag set |
+| `--mode` symbolic | ⚠️ | Octal only; help says symbolic partial |
+| `-N` ctime / sparse multi-vol / compressed remote / GNU snapshot / full `--warning` | ⏳ | Follow-up (see phase8 report B2) |
+
+**SELinux:** still policy no-op only.
+

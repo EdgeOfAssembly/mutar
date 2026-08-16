@@ -1,7 +1,7 @@
 # µtar (mutar) — GOAL: 100% GNU tar CLI (except SELinux)
 
-**Status:** ready to execute  
-**Date:** 2026-08-16  
+**Status:** Phases 1–7 complete; Phase 8 honesty/docs in progress  
+**Date:** 2026-08-16 (updated 2026-08-17)  
 **Owner:** EdgeOfAssembly  
 **Local tree:** `/tmp/mutar`  
 **Remote:** https://github.com/EdgeOfAssembly/mutar  
@@ -324,19 +324,19 @@ Report after each phase: commits, tests+exit codes, residual gaps.
 
 ## 10. Success metrics (checklist)
 
-- [ ] G0.1 `--show-snapshot-field-ranges`  
+- [x] G0.1 `--show-snapshot-field-ranges`  
 - [x] G1.1 full `--pax-option`  
-- [ ] G1.2 `--sparse-version`  
+- [x] G1.2 `--sparse-version`  
 - [x] G1.3 `-s` / preserve-order  
 - [x] G1.4 `-G` incremental  
 - [x] G1.5 `-g` listed-incremental complete  
 - [x] G1.6 mid-file multi-volume  
 - [x] G1.7 rmt lseek + remote append  
-- [ ] G1.8–G1.11 unquote, verbatim, ignore-command-error, quote-chars  
+- [x] G1.8–G1.11 unquote, verbatim, ignore-command-error, quote-chars  
 - [x] G1.12 exclude-ignore*  
-- [ ] G1.13–G1.16 atime-preserve, totals SIGNAL, `-o` create, quoting styles  
-- [ ] G1.17 `--preserve` long option  
-- [ ] G2 SELinux still policy no-op only  
+- [x] G1.13–G1.16 atime-preserve, totals SIGNAL, `-o` create, quoting styles  
+- [x] G1.17 `--preserve` long option  
+- [x] G2 SELinux still policy no-op only  
 - [ ] Phase 8 parity report = **YES** (except SELinux)  
 - [ ] Phase 9 multiagent Debug QA SHIP  
 - [ ] Tag **v0.3.0** pushed + durable  

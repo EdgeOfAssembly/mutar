@@ -878,7 +878,9 @@ public:
 
     /// True when the underlying fd supports lseek and is not a compression pipe.
     /// Remote rmt sessions are seekable via the L protocol command.
-    [[nodiscard]] bool is_seekable() const noexcept {
+    /// Honours Config::seek: --no-seek forces false; -n/--seek allows auto-detect.
+    [[nodiscard]] bool is_seekable(bool allow_seek = true) const noexcept {
+        if (!allow_seek) return false;
         if (rmt_) return true;
         if (fd_ < 0) return false;
         if (child_pid_ > 0) return false; // decompressor/compressor pipe
@@ -905,7 +907,7 @@ private:
 
 class BlockBuffer {
 public:
-    explicit BlockBuffer(int blocking = DEFAULT_BLOCK) {
+    explicit BlockBuffer(int blocking = DEFAULT_BLOCK, bool read_full_records = false) {
         // Validate before any use — a zero or negative blocking factor would
         // cause record_size_ to be 0 or wrap, leading to UB in buf_.resize().
         if (blocking < 1) {
@@ -914,8 +916,9 @@ public:
                          blocking);
             std::exit(EXIT_FAILURE);
         }
-        blocking_    = blocking;
-        record_size_ = static_cast<std::size_t>(blocking) * BLOCKSIZE;
+        blocking_          = blocking;
+        record_size_       = static_cast<std::size_t>(blocking) * BLOCKSIZE;
+        read_full_records_ = read_full_records;
         buf_.resize(record_size_);
     }
 
@@ -967,15 +970,25 @@ public:
 
 private:
     bool fill(ArchiveStream& s) {
-        ssize_t n = s.read_buf(buf_.data(), record_size_);
-        if (n <= 0) { used_ = 0; return false; }
-        used_ = static_cast<std::size_t>(n);
+        // -B/--read-full-records: reblock short pipe reads to a full record
+        // (GNU 4.2BSD pipe semantics). Without -B, a single read is enough.
+        std::size_t got = 0;
+        while (got < record_size_) {
+            ssize_t n = s.read_buf(buf_.data() + got, record_size_ - got);
+            if (n < 0) { used_ = 0; return false; }
+            if (n == 0) break;
+            got += static_cast<std::size_t>(n);
+            if (!read_full_records_) break;
+        }
+        if (got == 0) { used_ = 0; return false; }
+        used_ = got;
         pos_  = 0;
         return true;
     }
 
     int              blocking_;
     std::size_t      record_size_;
+    bool             read_full_records_ = false;
     std::vector<char> buf_;
     std::size_t      pos_  = 0;
     std::size_t      used_ = 0;
@@ -1946,8 +1959,9 @@ static std::vector<SparseSegment> detect_sparse_segments(int fd, std::int64_t fi
 // Handles: GNU LongName/LongLink, PAX extended headers, sparse maps.
 class ArchiveReader {
 public:
-    ArchiveReader(ArchiveStream& s, int blocking, bool ignore_zeros = false)
-        : stream_(&s), buf_(blocking), ignore_zeros_(ignore_zeros) {}
+    ArchiveReader(ArchiveStream& s, int blocking, bool ignore_zeros = false,
+                  bool read_full_records = false)
+        : stream_(&s), buf_(blocking, read_full_records), ignore_zeros_(ignore_zeros) {}
 
     /// Apply --pax-option rules on read (delete=, keyword=/:= overrides).
     void set_pax_rules(const PaxOptionRules* rules) {
@@ -3517,7 +3531,20 @@ static void walk_dir(const std::string& base_dir, const std::string& relpath,
             entries.emplace_back(dname);
         }
         ::closedir(d);
-        if (cfg.sort_order == "name") std::ranges::sort(entries);
+        if (cfg.sort_order == "name") {
+            std::ranges::sort(entries);
+        } else if (cfg.sort_order == "inode") {
+            // GNU --sort=inode: primary key st_ino, secondary name
+            std::ranges::sort(entries, [&](const std::string& a, const std::string& b) {
+                struct stat sa{}, sb{};
+                const std::string fa = full + "/" + a;
+                const std::string fb = full + "/" + b;
+                const ino_t ia = (::lstat(fa.c_str(), &sa) == 0) ? sa.st_ino : 0;
+                const ino_t ib = (::lstat(fb.c_str(), &sb) == 0) ? sb.st_ino : 0;
+                if (ia != ib) return ia < ib;
+                return a < b;
+            });
+        }
 
         // ── Per-directory exclusion: cache-tag directories ────────────────────
         // --exclude-caches-all / --exclude-caches-under: skip ALL contents
@@ -4170,7 +4197,7 @@ static int op_list(const Config& cfg) {
         return EXIT_FAILURE;
     }
     ArchiveStream& s = *res;
-    ArchiveReader reader(s, cfg.blocking_factor, cfg.ignore_zeros);
+    ArchiveReader reader(s, cfg.blocking_factor, cfg.ignore_zeros, cfg.read_full_records);
     if (cfg.pax_option_rules.any())
         reader.set_pax_rules(&cfg.pax_option_rules);
 
@@ -4728,7 +4755,7 @@ static int op_create(const Config& cfg) {
             verify_ok = false;
         } else {
             ArchiveStream& vs = *vres;
-            ArchiveReader vreader(vs, cfg.blocking_factor, cfg.ignore_zeros);
+            ArchiveReader vreader(vs, cfg.blocking_factor, cfg.ignore_zeros, cfg.read_full_records);
             int verify_count = 0;
             for (;;) {
                 auto [ve, vok, veof] = vreader.next_entry();
@@ -4829,7 +4856,7 @@ static int op_extract(const Config& cfg) {
     // named members, materialise decompressed bytes to a temp file so seek
     // extract works for .tar.xz / .tar.zst / etc. (full decompress once).
     const bool want_seek =
-        have_index && !want.empty() && !s.is_seekable() && !cfg.preserve_order;
+        have_index && !want.empty() && !s.is_seekable(cfg.seek) && !cfg.preserve_order;
     if (want_seek) {
         std::string materialize_temp;
         auto mat = ArchiveStream::materialize_seekable(s, materialize_temp);
@@ -4845,7 +4872,7 @@ static int op_extract(const Config& cfg) {
                   materialize_guard.path);
     }
 
-    ArchiveReader reader(s, cfg.blocking_factor, cfg.ignore_zeros);
+    ArchiveReader reader(s, cfg.blocking_factor, cfg.ignore_zeros, cfg.read_full_records);
     if (cfg.pax_option_rules.any())
         reader.set_pax_rules(&cfg.pax_option_rules);
 
@@ -4936,7 +4963,7 @@ static int op_extract(const Config& cfg) {
     std::vector<IndexEntry> seek_queue;
     bool use_index_seek = false;
     std::size_t seek_qi = 0;
-    if (have_index && !want.empty() && s.is_seekable() && !cfg.preserve_order) {
+    if (have_index && !want.empty() && s.is_seekable(cfg.seek) && !cfg.preserve_order) {
         for (const auto& ie : extract_index.all()) {
             std::string n = normalize_member(ie.name);
             if (want.contains(ie.name) || want.contains(n))
@@ -5080,7 +5107,8 @@ static int op_extract(const Config& cfg) {
                 if (::lstat(dpath.c_str(), &lnk_st) == 0 && S_ISLNK(lnk_st.st_mode)) {
                     struct stat tgt_st{};
                     if (::stat(dpath.c_str(), &tgt_st) == 0 && S_ISDIR(tgt_st.st_mode)) {
-                        dir_fixups.push_back({dpath, e.mtime, e.mtime_nsec, e.mode});
+                        if (cfg.delay_dir_restore && !cfg.no_delay_dir_restore)
+                            dir_fixups.push_back({dpath, e.mtime, e.mtime_nsec, e.mode});
                         reader.skip_entry(e);
                         break;
                     }
@@ -5108,8 +5136,11 @@ static int op_extract(const Config& cfg) {
                 break;
             }
 
-            if (cfg.no_delay_dir_restore) {
-                // Apply timestamps/permissions immediately
+            // GNU: delay only with --delay-directory-restore (cancelled by --no-delay-…)
+            if (cfg.delay_dir_restore && !cfg.no_delay_dir_restore) {
+                dir_fixups.push_back({dpath, e.mtime, e.mtime_nsec, e.mode});
+            } else {
+                // Default / --no-delay-directory-restore: apply immediately
                 if (!cfg.touch) {
                     struct timespec ts[2];
                     ts[0].tv_sec = ts[1].tv_sec   = e.mtime;
@@ -5119,8 +5150,6 @@ static int op_extract(const Config& cfg) {
                 bool set_perm = cfg.same_permissions ||
                                 (::getuid() == 0 && !cfg.no_same_permissions);
                 if (set_perm) ::chmod(dpath.c_str(), e.mode & 07777);
-            } else {
-                dir_fixups.push_back({dpath, e.mtime, e.mtime_nsec, e.mode});
             }
             restore_xattrs_acls(e, dpath, cfg);
             reader.skip_entry(e);
@@ -5207,7 +5236,8 @@ static int op_extract(const Config& cfg) {
                         } else {
                             reader.skip_entry(e);
                         }
-                        dir_fixups.push_back({dpath, e.mtime, e.mtime_nsec, e.mode});
+                        if (cfg.delay_dir_restore && !cfg.no_delay_dir_restore)
+                            dir_fixups.push_back({dpath, e.mtime, e.mtime_nsec, e.mode});
                         break;
                     }
                 }
@@ -5236,7 +5266,9 @@ static int op_extract(const Config& cfg) {
                     print(stderr, "mutar: {}: directory already exists, skipping metadata update\n", dpath);
                 break;
             }
-            if (cfg.no_delay_dir_restore) {
+            if (cfg.delay_dir_restore && !cfg.no_delay_dir_restore) {
+                dir_fixups.push_back({dpath, e.mtime, e.mtime_nsec, e.mode});
+            } else {
                 if (!cfg.touch) {
                     struct timespec ts[2];
                     ts[0].tv_sec = ts[1].tv_sec  = e.mtime;
@@ -5246,8 +5278,6 @@ static int op_extract(const Config& cfg) {
                 bool set_perm = cfg.same_permissions ||
                                 (::getuid() == 0 && !cfg.no_same_permissions);
                 if (set_perm) ::chmod(dpath.c_str(), e.mode & 07777);
-            } else {
-                dir_fixups.push_back({dpath, e.mtime, e.mtime_nsec, e.mode});
             }
             restore_xattrs_acls(e, dpath, cfg);
             break;
@@ -5260,7 +5290,14 @@ static int op_extract(const Config& cfg) {
                 std::string dpath = outpath;
                 dpath.pop_back();
                 ::mkdir(dpath.c_str(), 0777);
-                dir_fixups.push_back({dpath, e.mtime, e.mtime_nsec, e.mode});
+                if (cfg.delay_dir_restore && !cfg.no_delay_dir_restore)
+                    dir_fixups.push_back({dpath, e.mtime, e.mtime_nsec, e.mode});
+                else if (!cfg.touch) {
+                    struct timespec ts[2];
+                    ts[0].tv_sec = ts[1].tv_sec  = e.mtime;
+                    ts[0].tv_nsec = ts[1].tv_nsec = e.mtime_nsec;
+                    ::utimensat(AT_FDCWD, dpath.c_str(), ts, 0);
+                }
                 reader.skip_entry(e);
                 break;
             }
@@ -5518,7 +5555,7 @@ static int op_diff(const Config& cfg) {
         return EXIT_FAILURE;
     }
     ArchiveStream& s = *res;
-    ArchiveReader reader(s, cfg.blocking_factor, cfg.ignore_zeros);
+    ArchiveReader reader(s, cfg.blocking_factor, cfg.ignore_zeros, cfg.read_full_records);
     if (cfg.pax_option_rules.any())
         reader.set_pax_rules(&cfg.pax_option_rules);
 
@@ -5575,7 +5612,7 @@ static int op_append(const Config& cfg) {
         return EXIT_FAILURE;
     }
     ArchiveStream& s = *res;
-    ArchiveReader reader(s, cfg.blocking_factor, cfg.ignore_zeros);
+    ArchiveReader reader(s, cfg.blocking_factor, cfg.ignore_zeros, cfg.read_full_records);
     if (cfg.pax_option_rules.any())
         reader.set_pax_rules(&cfg.pax_option_rules);
 
@@ -5631,7 +5668,7 @@ static int op_update(const Config& cfg) {
             return EXIT_FAILURE;
         }
         ArchiveStream& s = *res;
-        ArchiveReader reader(s, cfg.blocking_factor, cfg.ignore_zeros);
+        ArchiveReader reader(s, cfg.blocking_factor, cfg.ignore_zeros, cfg.read_full_records);
         if (cfg.pax_option_rules.any())
             reader.set_pax_rules(&cfg.pax_option_rules);
         for (;;) {
@@ -5691,7 +5728,7 @@ static int op_delete(const Config& cfg) {
             return EXIT_FAILURE;
         }
         ArchiveStream& src = *res;
-        ArchiveReader reader(src, cfg.blocking_factor);
+        ArchiveReader reader(src, cfg.blocking_factor, false, cfg.read_full_records);
         if (cfg.pax_option_rules.any())
             reader.set_pax_rules(&cfg.pax_option_rules);
 
@@ -5757,7 +5794,7 @@ static int op_test_label(const Config& cfg) {
         return EXIT_FAILURE;
     }
     ArchiveStream& s = *res;
-    ArchiveReader reader(s, cfg.blocking_factor, cfg.ignore_zeros);
+    ArchiveReader reader(s, cfg.blocking_factor, cfg.ignore_zeros, cfg.read_full_records);
     if (cfg.pax_option_rules.any())
         reader.set_pax_rules(&cfg.pax_option_rules);
 
@@ -5792,7 +5829,7 @@ static int op_cat(const Config& cfg) {
     // Seek to just before EOF blocks
     {
         Config tmp = cfg;
-        ArchiveReader dummy(dst, cfg.blocking_factor);
+        ArchiveReader dummy(dst, cfg.blocking_factor, false, cfg.read_full_records);
         for (;;) {
             auto [e, ok, eof] = dummy.next_entry();
             if (eof || !ok) break;
@@ -6861,15 +6898,16 @@ static void print_usage(const char* prog) {
         "\nOperation modifiers:\n"
         "      --check-device              Check device numbers in listed-incremental snapshot (default)\n"
         "  -g, --listed-incremental=FILE   Handle new GNU-format incremental backup\n"
-        "                                  Snapshot records files+dirs (mtime+dev); skip filter is\n"
-        "                                  regular-file mtime (+dev when --check-device); dirs always dumped\n"
-        "  -G, --incremental               Handle old GNU-format incremental backup\n"
+        "                                  Snapshot records files+dirs (mtime+dev); level>=1 skips\n"
+        "                                  unchanged files/symlinks/specials (mtime+dev when\n"
+        "                                  --check-device); directories always dumped\n"
+        "  -G, --incremental               Handle old GNU-format incremental backup (dumpdir type D)\n"
         "      --hole-detection=METHOD     Use METHOD to detect holes in sparse files (seek/raw)\n"
         "      --ignore-failed-read        Do not exit with nonzero on unreadable files\n"
         "      --level=NUMBER              Dump level for created listed-incremental archive\n"
-        "  -n, --seek                      Archive is seekable\n"
+        "  -n, --seek                      Assume archive is seekable (default: auto-detect)\n"
         "      --no-check-device           Ignore device field in listed-incremental snapshot\n"
-        "      --no-seek                   Archive is not seekable\n"
+        "      --no-seek                   Do not seek in archive (disable index seek paths)\n"
         "      --occurrence[=NUMBER]       Process only the NUMBERth occurrence of each file in the archive\n"
         "      --sparse-version=MAJOR[.MINOR]  Set sparse format version (0.0, 0.1, 1.0); implies -S\n"
         "  -S, --sparse                    Handle sparse files efficiently\n"
@@ -6895,22 +6933,23 @@ static void print_usage(const char* prog) {
         "      --atime-preserve[=METHOD]   Preserve access times on dumped files\n"
         "                                  METHOD=replace (default) or system (O_NOATIME)\n"
         "      --clamp-mtime               Only set time when the file is more recent than what was given with --mtime\n"
-        "      --delay-directory-restore   Delay setting modification times and permissions of extracted directories\n"
+        "      --delay-directory-restore   Delay setting mtime/mode of extracted directories until end\n"
         "      --group=NAME                Force NAME as group for added files\n"
         "      --group-map=FILE            Use FILE to map file owner GIDs\n"
-        "      --mode=CHANGES              Force (symbolic) mode CHANGES for added files\n"
+        "      --mode=CHANGES              Force mode CHANGES for added files (octal; symbolic partial)\n"
         "      --mtime=DATE-OR-FILE        Set mtime for added files from DATE-OR-FILE\n"
-        "      --no-delay-directory-restore  Cancel the effect of --delay-directory-restore option\n"
+        "      --no-delay-directory-restore  Apply directory mtime/mode immediately (default)\n"
         "      --no-same-owner             Extract files as yourself (default for ordinary users)\n"
         "      --no-same-permissions       Apply the user's umask when extracting permissions\n"
         "      --numeric-owner             Always use numbers for user/group names\n"
         "      --owner=NAME                Force NAME as owner for added files\n"
         "      --owner-map=FILE            Use FILE to map file owner UIDs\n"
+        "  -m, --touch                    Don't extract file modified time\n"
         "  -p, --preserve-permissions, --same-permissions  Extract information about file permissions\n"
         "      --preserve                  Same as both -p and -s\n"
         "  -s, --preserve-order, --same-order  Member arguments listed in the same order as the archive\n"
         "      --same-owner                Try extracting files with the same ownership as exists in the archive\n"
-        "      --sort=ORDER                Directory sorting order: none (default), name or inode\n",
+        "      --sort=ORDER                Directory sorting order: none (default), name, or inode\n",
         prog);
     // Extended file attributes section — printed only when built with support
 #if defined(MUTAR_HAVE_XATTR) || defined(MUTAR_HAVE_ACL)
@@ -6939,7 +6978,7 @@ static void print_usage(const char* prog) {
         "                                  Run script at end of each volume (implies -M);\n"
         "                                  sets TAR_ARCHIVE, TAR_VOLUME; non-zero exit fails\n"
         "  -L, --tape-length=NUMBER        Change volume after NUMBER x 1024 bytes (implies -M);\n"
-        "                                  between-member rotation only (no mid-file split)\n"
+        "                                  between-member rotation and mid-file split (type M)\n"
         "  -M, --multi-volume              Create/list/extract multi-volume archive\n"
         "      --rmt-command=COMMAND       Use given rmt COMMAND instead of rmt\n"
         "                                  (O/R/W/L/C; L=lseek enables remote -r/-u)\n"
@@ -6947,7 +6986,7 @@ static void print_usage(const char* prog) {
         "      --volno-file=F              Read/write current volume number in F (atomic)\n"
         "\nDevice blocking:\n"
         "  -b, --blocking-factor=BLOCKS    BLOCKS x 512 bytes per record\n"
-        "  -B, --read-full-records         Reblock as we read (for 4.2BSD pipes)\n"
+        "  -B, --read-full-records         Reblock short reads to full records (4.2BSD pipes)\n"
         "  -i, --ignore-zeros              Ignore zeroed blocks in archive (means EOF)\n"
         "      --record-size=NUMBER        NUMBER of bytes per record, multiple of 512\n"
         "\nArchive format selection:\n"
@@ -6991,6 +7030,10 @@ static void print_usage(const char* prog) {
         "      --exclude-vcs-ignores       Read exclude patterns from the VCS ignore files\n"
         "      --anchored                  Patterns match file name start\n"
         "      --no-anchored               Patterns match after any '/' (match basename)\n"
+        "  -h, --dereference              Follow symlinks; archive and dump the files they point to\n"
+        "      --hard-dereference         Follow hard links; archive and dump the files they refer to\n"
+        "      --ignore-case              Ignore case when matching patterns\n"
+        "      --no-ignore-case           Case-sensitive pattern matching (default)\n"
         "      --no-null                   Disable the effect of the previous --null option\n"
         "      --no-recursion              Avoid descending automatically in directories\n"
         "      --no-unquote                Do not unquote input file or member names\n"
@@ -7000,6 +7043,7 @@ static void print_usage(const char* prog) {
         "  -N, --newer=DATE-OR-FILE, --after-date=DATE-OR-FILE  Only store files newer than DATE-OR-FILE\n"
         "      --newer-mtime=DATE          Compare date and time when data changed only\n"
         "      --null                      -T reads null-terminated names; implies --verbatim-files-from\n"
+        "  -l, --check-links              Print a message if not all hard links are dumped\n"
         "      --one-file-system           Stay in local file system when creating archive\n"
         "  -P, --absolute-names            Don't strip leading '/'s from file names\n"
         "      --recursion                 Recurse into directories (default)\n"

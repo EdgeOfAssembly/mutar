@@ -222,7 +222,7 @@ Magic-byte auto-detection works on read even without `-a`.
 | `--rsh-command --rmt-command` | ✅ Implemented | rmt O/R/W/L/C via rsh; L=lseek enables remote -r/-u (uncompressed) |
 | `--backup --suffix` | ✅ | `none`/`off`, `simple`/`never`, `numbered`/`t`, `existing`/`nil` (+ `--suffix`) |
 | `-s / --preserve-order` | ✅ Implemented | GNU same-order extract: want-list head advances on match |
-| `--sparse-version` | ⚠️ Partial | String stored; write path hardcodes GNU.sparse 1.0 |
+| `--sparse-version` | ✅ Implemented | Parses 0.0/0.1/1.0; implies `-S`; write uses major/minor (1.x PAX / 0.x GNU `S`) |
 | `--owner-map` / `--group-map` | ✅ | Loaded and applied at create time (PR #172) |
 | `--overwrite-dir` / `--no-overwrite-dir` | ✅ | Wired in DIRTYPE extract (PR #172) |
 | `--warning=KEYWORD` | ✅ | `mutar_warn()` wired at key emission sites (PR #172) |

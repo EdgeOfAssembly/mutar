@@ -247,16 +247,15 @@ bash -c "
 " && pass "T-NO-14 show-omitted-dirs" || fail "T-NO-14 show-omitted-dirs" "failed"
 
 # ── preserve-order ────────────────────────────────────────────────────────────
-T "T-NO-15: -s / --preserve-order emits not-implemented warning" \
+T "T-NO-15: -s / --preserve-order is accepted (Phase 7 implemented)" \
 bash -c "
   ARCH=\"$TMPDIR_BASE/order_test.tar\"
   \"$MUTAR\" -c -f \"\$ARCH\" -C \"$TMPDIR_BASE\" ground >/dev/null 2>&1
-  # -s emits a warning (not yet implemented) and is otherwise accepted
-  OUT=\$(\"$MUTAR\" -t -s -f \"\$ARCH\" 2>&1)
-  echo \"\$OUT\" | grep -qi 'warning\|not.*implemented\|ignored' \
-    && echo '  -s emits not-implemented warning as expected' \
-    || echo '  INFO: -s accepted (warning may go to stderr separately)'
-  # The key check: it should still work (exit 0)
+  # -s is fully implemented (ordered want-list); must list without error
+  OUT=\$(\"$MUTAR\" -t -s -f \"\$ARCH\" 2>&1) || exit 1
+  echo \"\$OUT\" | grep -qi 'not.*implemented' \
+    && { echo '  FAIL: -s still claims not implemented'; exit 1; } \
+    || echo '  -s accepted without not-implemented warning'
 " && pass "T-NO-15 preserve-order" || fail "T-NO-15 preserve-order" "flag caused error"
 
 # ── hole-detection ────────────────────────────────────────────────────────────

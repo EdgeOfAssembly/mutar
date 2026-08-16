@@ -62,7 +62,7 @@ Every PR for mutar must include a status table like this:
 | Option | Status | Notes |
 |--------|--------|-------|
 | `-c`, `--create` | ✅ Implemented | Full parity with tar.1 |
-| `-S`, `--sparse` | ⚠️ Partial | Sparse write/extract works; `--hole-detection` wired; `--sparse-version` string-only (always emit 1.0) |
+| `-S`, `--sparse` | ✅ Implemented | Sparse write/extract; `--hole-detection`; `--sparse-version` 0.0/0.1/1.0 |
 | `--pax-option` | ✅ Implemented | Full GNU set: delete=, exthdr.*, globexthdr.*, keyword=/:= |
 | `--verify` | ✅ Implemented | Post-create re-read verification |
 
@@ -130,12 +130,12 @@ See `COMPATIBILITY_PROGRESS.md` for the full option audit. Short list matching c
 **True no-ops / broken parse:**
 - SELinux (`--selinux` / `--no-selinux`) — policy-unsupported no-op + warning
 
-**Partial (do not claim complete):**
-- Multi-volume (`-M -L`): between-member + mid-file split (`GNUTYPE_MULTIVOL` 'M'); extract reassembly
-- rmt: O/R/W/L/C via rsh (L=lseek); remote -r/-u when seek works; compressed remote not supported
-- ~~`-s` / `--preserve-order`~~ — implemented (Phase 7)
+**Partial / limited (do not claim complete GNU parity):**
+- rmt: O/R/W/L/C via rsh (L=lseek); remote -r/-u when seek works; **compressed remote not supported**
+- Listed-incremental uses `MUTAR_SNAPSHOT_V2` text format (not GNU binary snapshot)
+- True compressed frame-level seek without materialize (see `TODO.md`)
 
-**Implemented (do not list as no-ops):** `--pax-option` (full GNU set), `--restrict`, `--backup` CONTROL (`none`/`simple`/`numbered`/`existing`), `--quoting-style`, `--check-device`/`--no-check-device`, `--xattrs` / `--acls` (SCHILY PAX when built with lib support), `--verify`, `--hole-detection`, `--owner-map` / `--group-map`, `--exclude-vcs-ignores`, `--exclude-ignore` / `--exclude-ignore-recursive`, `-G` dumpdir create/extract, `-g` listed-incremental (skip files/symlinks/specials; dirs always dumped), `--sparse-version`, `--index-file`, `--checkpoint-action`, `--interactive`, `--full-time`, `--warning`, wildcards/anchoring, `--overwrite-dir` / `--no-overwrite-dir`, and related PR #170/#172 features.
+**Implemented (do not list as no-ops):** multi-volume mid-file (`GNUTYPE_MULTIVOL` 'M'), `-s`/`--preserve-order`, `--pax-option` (full GNU set), `--restrict`, `--backup` CONTROL (`none`/`simple`/`numbered`/`existing`), `--quoting-style` (+ shell-escape/locale/clocale), `--check-device`/`--no-check-device`, `--xattrs` / `--acls` (SCHILY PAX when built with lib support), `--verify`, `--hole-detection`, `--owner-map` / `--group-map`, `--exclude-vcs-ignores`, `--exclude-ignore` / `--exclude-ignore-recursive`, `-G` dumpdir create/extract, `-g` listed-incremental (skip files/symlinks/specials; dirs always dumped), `--sparse-version` 0.0/0.1/1.0, `--index-file`, `--checkpoint-action`, `--interactive`, `--full-time`, `--warning`, wildcards/anchoring, `--overwrite-dir` / `--no-overwrite-dir`, and related PR #170/#172 / GOAL_GNU_PARITY Phase 1–7 features.
 
 ---
 
