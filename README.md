@@ -200,16 +200,16 @@ Magic-byte auto-detection works on read even without `-a`.
 |--------|--------|-------|
 | `--pax-option` | ⚠️ Partial | `delete=KEYWORD` applied on write; other keywords accepted silently |
 | `--volno-file` | ✅ | Atomic read/write of current volume number |
-| `--check-device` / `--no-check-device` | ❌ No-op | Pure parse discard; no Config field |
+| `--check-device` / `--no-check-device` | ✅ | Config `check_device` (default on); snapshot V2 stores `st_dev`; re-archive when device changes |
 | `--info-script` / `--new-volume-script` | ✅ | Exec'd at volume boundary; TAR_ARCHIVE/TAR_VOLUME; non-zero fails |
-| `--restrict` | ⚠️ Partial | Stored (`restrict_opt`); restrictions not enforced |
-| `--quoting-style` | ⚠️ Partial | Stored; list/verbose output never consults style |
+| `--restrict` | ✅ | Rejects `-P`/`--absolute-names`, `--to-command`, multi-volume (`-M`/`-L`/`-F`) |
+| `--quoting-style` | ✅ | `literal`/`escape`/`c`/`c-maybe`/`shell`/`shell-always` for `-t` and verbose extract |
 | `--xattrs` / `--acls` | ✅ | Store/restore via PAX `SCHILY.xattr.*` / `SCHILY.acl.*` when built with lib support; SELinux never stored |
 | `--selinux` / `--no-selinux` | ❌ Unsupported | Policy: no-op + warning (no test hardware) |
-| `-G -g --listed-incremental` | ⚠️ Partial | Level-0 snapshot + level≥1 mtime skip for regular files; dirs/specials always archived |
+| `-G -g --listed-incremental` | ⚠️ Partial | Snapshot V2 records files+dirs (mtime+dev); skip filter is regular-file mtime (+dev); dirs always dumped |
 | `--multi-volume -M -L` | ⚠️ Partial | Between-member rotation + extract stream swap; mid-file split not supported |
-| `--rsh-command --rmt-command` | ⚠️ Partial | rmt O/R/W/C bridge via rsh; lseek/append not supported |
-| `--backup --suffix` | ⚠️ Partial | Simple suffix rename on extract overwrite works; numbered/existing CONTROL not implemented |
+| `--rsh-command --rmt-command` | ⚠️ Partial | rmt O/R/W/C bridge via rsh; lseek (`S`) / remote append not supported |
+| `--backup --suffix` | ✅ | `none`/`off`, `simple`/`never`, `numbered`/`t`, `existing`/`nil` (+ `--suffix`) |
 | `-s / --preserve-order` | ⚠️ Partial | Accepted (emits warning); not yet wired into traversal |
 | `--sparse-version` | ⚠️ Partial | String stored; write path hardcodes GNU.sparse 1.0 |
 | `--owner-map` / `--group-map` | ✅ | Loaded and applied at create time (PR #172) |
@@ -221,11 +221,10 @@ Magic-byte auto-detection works on read even without `-a`.
 | Feature | Notes |
 |---------|-------|
 | SELinux | Unsupported by policy (`--selinux` no-op + warning); never stored under `--xattrs` |
-| Incremental backups (`-G -g`) | Snapshot works for regular-file mtime; dirs/specials always archived |
+| Incremental backups (`-G -g`) | Snapshot V2 has dirs+dev; skip still regular-file only (dirs always dumped) |
 | Remote tape (`--rsh/rmt-command`) | Bridge works; lseek over rmt / remote append not implemented |
 | Multi-volume mid-file split | Between-member works; single file > tape length errors (no GNUTYPE_MULTIVOL) |
 | `--pax-option` keyword processing | `delete=KEYWORD` only; full GNU set not implemented |
-| `--backup` CONTROL | Simple suffix only; numbered/existing not implemented |
 
 ---
 

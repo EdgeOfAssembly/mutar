@@ -178,8 +178,8 @@ Legend:
 | `--checkpoint[=N]` | ✅ | |
 | `--checkpoint-action=ACTION` | 🆕 | `dot/echo/ttyout` via `do_checkpoint()` |
 | `--warning=KEYWORD` | 🆕 | Warning set processing implemented |
-| `--restrict` | ⚠️ | Stored; restrictions not enforced |
-| `--quoting-style=STYLE` | ⚠️ | Stored; output style not changed |
+| `--restrict` | ✅ | Phase E: rejects `-P`, `--to-command`, multi-volume |
+| `--quoting-style=STYLE` | ✅ | Phase E: applied on `-t` / verbose extract |
 
 ### Hard Links & Labels
 
@@ -194,7 +194,7 @@ Legend:
 |--------|--------|-------|
 | `-W` / `--verify` | 🆕 | Post-create re-read verification implemented |
 | `--interactive` / `--confirmation` | 🆕 | Per-file confirmation prompts |
-| `--check-device` / `--no-check-device` | ❌ | No-op: pure parse discard; no `Config` field; incremental compares mtime only |
+| `--check-device` / `--no-check-device` | ✅ | Phase E: `check_device` default true; snapshot V2 device field |
 
 ### Incremental / Snapshot
 
@@ -227,8 +227,8 @@ Legend:
 |--------|--------|-------|
 | `--sort=ORDER` | ✅ | `name` implemented; `inode` accepted |
 | `--remove-files` | ✅ | |
-| `--backup[=CONTROL]` | ⚠️ | Partial: simple suffix rename on extract overwrite works; `none`/`off` disables; numbered/existing CONTROL not implemented |
-| `--suffix=SUFFIX` | ⚠️ | Partial: sets `backup_suffix` (default `~`); used by simple backup rename |
+| `--backup[=CONTROL]` | ✅ | Phase E: `none`/`off`, `simple`/`never`, `numbered`/`t` (`file.~N~`), `existing`/`nil` |
+| `--suffix=SUFFIX` | ✅ | Sets `backup_suffix` (default `~`); used by simple/existing fallback |
 | `--help` | 🆕 | All ~100 options now listed |
 | `--version` | ✅ | |
 | `--usage` | ✅ | |
@@ -541,17 +541,17 @@ compatibility.
 | `--volno-file` | `volno_file` | ✅ Phase C: CLI assigns; atomic read/write of current volume number |
 | `--owner-map` / `--group-map` | `owner_map_file`, `group_map_file` | ✅ PR #172: fully implemented; maps uname/gname/uid/gid at create time |
 | `--info-script` / `--new-volume-script` | `info_script` | ✅ Phase C: exec'd at volume boundary; non-zero fails; TAR_* env |
-| `--check-device` / `--no-check-device` | *(none)* | ❌ No-op: pure parse discard; no Config field; incremental compares mtime only |
-| `--restrict` | `restrict_opt` | ⚠️ Stored; no privilege restrictions enforced |
-| `--quoting-style` | `quoting_style` | ⚠️ Stored; list/verbose output never consults style |
-| `--backup` / `--suffix` | `backup`, `backup_control`, `backup_suffix` | ⚠️ Simple suffix rename on extract works; numbered/existing CONTROL not implemented |
+| `--check-device` / `--no-check-device` | `check_device` | ✅ Phase E: default true; snapshot V2 stores `st_dev`; re-archive when device changes under listed-incremental |
+| `--restrict` | `restrict_opt` | ✅ Phase E: rejects `-P`/`--absolute-names`, `--to-command`, multi-volume |
+| `--quoting-style` | `quoting_style` | ✅ Phase E: `literal`/`escape`/`c`/`c-maybe`/`shell`/`shell-always` for `-t` and verbose extract |
+| `--backup` / `--suffix` | `backup`, `backup_control`, `backup_suffix` | ✅ Phase E: `none`/`off`, `simple`/`never`, `numbered`/`t`, `existing`/`nil` |
 | `--sparse-version` | `sparse_version` | ⚠️ String stored; `sparse_major`/`sparse_minor` never parsed; write hardcodes 1.0 |
 | `-L` / `--tape-length` | `tape_length_str`, `tape_length` | ✅ Phase C: numeric parse into `tape_length`; implies `-M` |
 | `--xattrs` / `--acls` | `xattrs`, `acls` | ✅ Store/restore via SCHILY PAX (GOAL_NEXT Phase D / G6–G8); SELinux still unsupported |
 | `--selinux` / `--no-selinux` | `selinux` | **Unsupported by policy** (no test hardware); accepted as no-op with warning |
-| `-G` / `-g` (incremental) | `listed_incremental` | ✅ PR #172: snapshot written at level-0; level≥1 skips unchanged files. Limitation: only regular files compared by mtime. |
+| `-G` / `-g` (incremental) | `listed_incremental` | ⚠️ Phase E: snapshot **V2** (`name\tmtime\tdev`) records files **and directories**; level≥1 skip is still **regular-file mtime** (+ device when `--check-device`); dirs/symlinks/specials always archived |
 | `-M` (multi-volume) | `multi_volume` | ⚠️ Phase C: between-member stream swap create+extract; **mid-file split still TODO** |
-| `--rsh-command` / `--rmt-command` | `rsh_command`, `rmt_command` | 🔧 PR #172: rmt bridge via rsh fork+pipe; O/R/W/C protocol implemented. Limitation: lseek over rmt not implemented |
+| `--rsh-command` / `--rmt-command` | `rsh_command`, `rmt_command` | 🔧 PR #172: rmt bridge via rsh fork+pipe; O/R/W/C protocol implemented. **Limitation (G11):** rmt `lseek`/`S` and remote append not implemented (documented in `--help`) |
 | PAX sparse write format | `fmt_` | ✅ PR #172: when `--format=pax`, GNU.sparse.* PAX keywords emitted; GNU.sparse.map parsed on read |
 | `--warning=KEYWORD` | `warnings_enabled/disabled` | ✅ PR #172: `mutar_warn()` helper implemented and wired at key emission sites |
 | `--overwrite-dir` / `--no-overwrite-dir` | `overwrite_dir`, `no_overwrite_dir` | ✅ PR #172: DIRTYPE case in op_extract checks existing path and skips fixup when --no-overwrite-dir |
@@ -604,6 +604,11 @@ bash tests/test_xattrs_acls.sh  build/mutar
   with `--acls`, and extract without `--xattrs` leaves attrs unset. Skips
   when build or host lacks support.
 
+- **`test_phase_e.sh`**: Phase E (G10–G15) — `--restrict` rejects `-P`,
+  `--to-command`, multi-volume; `--backup=simple|none|numbered`;
+  `--quoting-style=literal|escape|c|shell`; `--check-device` parse;
+  listed-incremental snapshot V2 (dirs + device field); help text.
+
 ### Interoperability verification
 
 Key interop checks in `run_tests.sh`:
@@ -612,3 +617,20 @@ Key interop checks in `run_tests.sh`:
 - **T17**: `mutar -tJf tar-1.35.tar.xz` — reads a real GNU tar 1.35 archive
 - **T26/T27**: extract all 7 repo `.tar.*` archives, repack, re-extract,
   compare file counts — catches format-parsing regressions
+
+---
+
+## Phase E — Incremental / remote / polish (G10–G15) (2026-08-16)
+
+| ID | Item | Status | Notes |
+|----|------|--------|-------|
+| G13 | `--restrict` | ✅ Implemented | Rejects `-P`/`--absolute-names`, `--to-command`, multi-volume (`-M`/`-L`/`-F`); clear error + non-zero exit |
+| G15 | `--backup` CONTROL | ✅ Implemented | `none`/`off`, `simple`/`never` (suffix), `numbered`/`t` (`file.~N~`), `existing`/`nil` |
+| G12 | `--quoting-style` | ✅ Implemented | `literal`, `escape`, `c`, `c-maybe`, `shell`, `shell-always` on `-t` and verbose extract |
+| G14 | `--check-device` | ✅ Implemented | `Config::check_device` default true; snapshot V2 stores `st_dev`; re-archive when device changes |
+| G10 | Incremental dirs | ⚠️ Partial | Snapshot records directories + specials; skip filter remains regular-file mtime (+dev) |
+| G11 | rmt lseek | 📄 Documented only | Help + this file: rmt `S`/lseek and remote append not supported |
+
+**Tests:** `tests/test_phase_e.sh` (CTest `mutar_phase_e_tests`).
+
+**Snapshot format:** `MUTAR_SNAPSHOT_V2` lines are `name\tmtime\tdev`. V1 (`name\tmtime`) still readable.

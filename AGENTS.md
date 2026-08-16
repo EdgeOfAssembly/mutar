@@ -127,19 +127,17 @@ For any PR changing mutar behavior:
 See `COMPATIBILITY_PROGRESS.md` for the full option audit. Short list matching code truth:
 
 **True no-ops / broken parse:**
-- `--check-device` / `--no-check-device` — pure discard; no Config field
-- `--quoting-style` — stored, never used for list/verbose output
-- `--restrict` — stored (`restrict_opt`), not enforced
 - SELinux (`--selinux` / `--no-selinux`) — policy-unsupported no-op + warning
 
 **Partial (do not claim complete):**
 - Multi-volume (`-M -L`): between-member create/extract + stream swap; mid-file split not supported
 - `--pax-option` — `delete=KEYWORD` only (other keywords ignored)
-- `--backup` / `--suffix` — simple suffix rename works; numbered/existing CONTROL not implemented
+- Listed-incremental (`-g`): snapshot V2 records files+dirs with mtime+dev; skip filter is regular-file only (dirs always dumped)
+- rmt: O/R/W/C bridge works; lseek (`S`) / remote append not implemented
 - `-s` / `--preserve-order` — accepted with not-implemented warning
 - `--sparse-version` — string stored; write hardcodes 1.0
 
-**Implemented (do not list as no-ops):** `--xattrs` / `--acls` (SCHILY PAX store/restore when built with lib support), `--verify`, `--hole-detection`, `--owner-map` / `--group-map`, `--exclude-vcs-ignores`, `--index-file`, `--checkpoint-action`, `--interactive`, `--full-time`, `--warning`, wildcards/anchoring, `--overwrite-dir` / `--no-overwrite-dir`, and related PR #170/#172 features.
+**Implemented (do not list as no-ops):** `--restrict`, `--backup` CONTROL (`none`/`simple`/`numbered`/`existing`), `--quoting-style`, `--check-device`/`--no-check-device`, `--xattrs` / `--acls` (SCHILY PAX when built with lib support), `--verify`, `--hole-detection`, `--owner-map` / `--group-map`, `--exclude-vcs-ignores`, `--index-file`, `--checkpoint-action`, `--interactive`, `--full-time`, `--warning`, wildcards/anchoring, `--overwrite-dir` / `--no-overwrite-dir`, and related PR #170/#172 features.
 
 ---
 

@@ -273,6 +273,7 @@ struct Config {
     bool old_archive         = false;   // --old-archive (=v7)
     bool utc_time            = false;   // --utc
     bool restrict_opt        = false;   // --restrict
+    bool check_device         = true;    // --check-device (default on for incremental)
     bool atime_preserve      = false;   // --atime-preserve
 
     bool   no_recursion        = false;  // --no-recursion
@@ -322,7 +323,8 @@ struct Config {
     std::vector<std::string> exclude_tags;        // --exclude-tag=FILE
     std::vector<std::string> exclude_tags_all;    // --exclude-tag-all=FILE
     std::vector<std::string> exclude_tags_under;  // --exclude-tag-under=FILE
-    std::string backup_control;                   // --backup[=CONTROL]
+    // --backup[=CONTROL]: none/off | simple/never | numbered/t | existing/nil
+    std::string backup_control;                   // empty → simple when backup set
     std::string backup_suffix = "~";              // --suffix=STRING
 };
 

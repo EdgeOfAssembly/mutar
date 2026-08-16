@@ -1,6 +1,6 @@
 # µtar (mutar) — GOAL_NEXT (post-v0.1.0)
 
-**Status:** phases A–D complete; **stop for user OK before E–H**  
+**Status:** phases A–E complete; **stop for user OK before F–H**  
 **Date:** 2026-08-16  
 **Owner:** EdgeOfAssembly  
 **Local tree:** `/tmp/mutar`  
@@ -69,12 +69,12 @@ When this campaign is complete:
 
 | ID | Gap | Acceptance |
 |----|-----|------------|
-| G10 | Incremental only compares regular-file mtime | Dirs/symlinks/specials handled per GNU tar listed-incremental semantics (or document limits) |
-| G11 | rmt `lseek` / remote append | Document or implement `S` command; append/update on remote |
-| G12 | `--quoting-style` | List/verbose output respects style |
-| G13 | `--restrict` | Dangerous options rejected when set |
-| G14 | `--check-device` | Wired into incremental device checks |
-| G15 | `--backup` / `--suffix` | Numbered/existing CONTROL (simple suffix rename already works) |
+| G10 | Incremental only compares regular-file mtime | ⚠️ Phase E: snapshot V2 records dirs+dev; skip still regular-file only (dirs always dumped) |
+| G11 | rmt `lseek` / remote append | 📄 Documented only (help + COMPATIBILITY); not implemented |
+| G12 | `--quoting-style` | ✅ Phase E: literal/escape/c/shell on -t and verbose extract |
+| G13 | `--restrict` | ✅ Phase E: rejects -P, --to-command, multi-volume |
+| G14 | `--check-device` | ✅ Phase E: Config flag + snapshot V2 st_dev |
+| G15 | `--backup` / `--suffix` | ✅ Phase E: none/simple/numbered/existing |
 
 ### P3 — Performance / seek evolution
 

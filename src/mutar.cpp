@@ -12,6 +12,7 @@
 #include "mutar.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <cerrno>
 #include <climits>
 #include <cstdio>
@@ -2665,6 +2666,172 @@ static void walk_dir(const std::string& base_dir, const std::string& relpath,
     }
 }
 
+// ── Name quoting (--quoting-style) ────────────────────────────────────────────
+// Styles: literal (raw), escape (backslash), c / c-maybe, shell / shell-always.
+// Unknown styles fall back to literal. Default (empty) keeps historical raw output.
+
+static bool name_needs_shell_quote(const std::string& name) {
+    for (unsigned char c : name) {
+        if (std::isalnum(c) || c == '.' || c == '/' || c == '_' || c == '-' ||
+            c == '+' || c == ',' || c == ':' || c == '@' || c == '%')
+            continue;
+        return true;
+    }
+    return name.empty();
+}
+
+static bool name_needs_c_quote(const std::string& name) {
+    for (unsigned char c : name) {
+        if (c <= 0x1f || c == '"' || c == '\\' || c == ' ' || c == '\'' || c >= 0x7f)
+            return true;
+    }
+    return false;
+}
+
+static std::string quote_name(const std::string& name, const std::string& style) {
+    if (style.empty() || style == "literal")
+        return name;
+
+    if (style == "escape") {
+        std::string out;
+        out.reserve(name.size() + 8);
+        for (unsigned char c : name) {
+            if (c == ' ' || c == '\\' || c == '\t' || c == '\n' || c == '"' ||
+                c == '\'' || c == '$' || c == '`' || c <= 0x1f || c >= 0x7f)
+                out.push_back('\\');
+            if (c == '\n') { out.push_back('n'); continue; }
+            if (c == '\t') { out.push_back('t'); continue; }
+            out.push_back(static_cast<char>(c));
+        }
+        return out;
+    }
+
+    if (style == "c" || style == "c-maybe") {
+        if (style == "c-maybe" && !name_needs_c_quote(name))
+            return name;
+        std::string out;
+        out.reserve(name.size() + 8);
+        out.push_back('"');
+        for (unsigned char c : name) {
+            if (c == '"' || c == '\\') {
+                out.push_back('\\');
+                out.push_back(static_cast<char>(c));
+            } else if (c == '\n') {
+                out += "\\n";
+            } else if (c == '\t') {
+                out += "\\t";
+            } else if (c < 0x20 || c >= 0x7f) {
+                out += std::format("\\{:03o}", static_cast<unsigned>(c));
+            } else {
+                out.push_back(static_cast<char>(c));
+            }
+        }
+        out.push_back('"');
+        return out;
+    }
+
+    if (style == "shell" || style == "shell-always") {
+        if (style == "shell" && !name_needs_shell_quote(name))
+            return name;
+        std::string out;
+        out.reserve(name.size() + 8);
+        out.push_back('\'');
+        for (char c : name) {
+            if (c == '\'')
+                out += "'\\''";
+            else
+                out.push_back(c);
+        }
+        out.push_back('\'');
+        return out;
+    }
+
+    // locale / clocale / unknown → literal
+    return name;
+}
+
+// ── Backup path (--backup[=CONTROL] / --suffix) ───────────────────────────────
+// CONTROL: none/off (no backup), simple/never (suffix), numbered/t (file.~N~),
+//          existing/nil (numbered if any .~N~ exists, else simple).
+
+static std::string normalize_backup_control(std::string_view ctrl) {
+    if (ctrl.empty()) return "simple";
+    if (ctrl == "none" || ctrl == "off") return "none";
+    if (ctrl == "t" || ctrl == "numbered") return "numbered";
+    if (ctrl == "nil" || ctrl == "existing") return "existing";
+    if (ctrl == "never" || ctrl == "simple") return "simple";
+    // Unknown CONTROL: treat as simple (GNU falls back similarly for some values)
+    return "simple";
+}
+
+static bool numbered_backup_exists(const std::string& path) {
+    // GNU "existing": numbered if any path.~N~ is present; check .~1~ is enough
+    // for the common case (numbered backups are dense from 1).
+    std::string first = path + ".~1~";
+    return ::access(first.c_str(), F_OK) == 0;
+}
+
+static std::string next_numbered_backup(const std::string& path) {
+    for (int n = 1; n < 1000000; ++n) {
+        std::string cand = path + ".~" + std::to_string(n) + "~";
+        if (::access(cand.c_str(), F_OK) != 0)
+            return cand;
+    }
+    // Fallback if absurd number of backups already exist
+    return path + ".~999999~";
+}
+
+/// Compute backup destination path, or empty string if backups are disabled.
+static std::string make_backup_path(const std::string& path, const Config& cfg) {
+    if (!cfg.backup)
+        return {};
+    std::string ctrl = normalize_backup_control(cfg.backup_control);
+    if (ctrl == "none")
+        return {};
+    if (ctrl == "numbered")
+        return next_numbered_backup(path);
+    if (ctrl == "existing") {
+        if (numbered_backup_exists(path))
+            return next_numbered_backup(path);
+        return path + cfg.backup_suffix;
+    }
+    // simple
+    return path + cfg.backup_suffix;
+}
+
+// ── --restrict: reject dangerous option combinations ──────────────────────────
+// When --restrict is set, refuse absolute names, --to-command, and multi-volume
+// (the multi-volume interactive shell escape is the classic GNU tar concern;
+// absolute paths and to-command are additional hardening).
+
+static bool enforce_restrict(const Config& cfg) {
+    if (!cfg.restrict_opt)
+        return true;
+    if (cfg.absolute_names) {
+        print(stderr,
+              "mutar: --restrict forbids -P / --absolute-names\n");
+        return false;
+    }
+    if (!cfg.to_command.empty()) {
+        print(stderr,
+              "mutar: --restrict forbids --to-command\n");
+        return false;
+    }
+    if (cfg.multi_volume) {
+        print(stderr,
+              "mutar: --restrict forbids multi-volume (-M / -L / --info-script)\n");
+        return false;
+    }
+    return true;
+}
+
+// Snapshot entry for listed-incremental (mtime + optional device)
+struct SnapRec {
+    std::int64_t  mtime   = 0;
+    std::uint64_t dev     = 0;
+    bool          has_dev = false;
+};
+
 // ── Verbose line output (matching GNU tar format) ─────────────────────────────
 
 static std::string format_mode(char typeflag, unsigned mode) {
@@ -2745,13 +2912,17 @@ static void print_verbose(const Entry& e, const Config& cfg,
     std::string line;
     if (cfg.block_number && block_no_val >= 0)
         line += std::format("{}: ", block_no_val);
+    const std::string qname = quote_name(e.name, cfg.quoting_style);
+    const std::string qlink = (e.typeflag == SYMTYPE)
+                                  ? quote_name(e.linkname, cfg.quoting_style)
+                                  : std::string{};
     line += std::format("{} {:<17} {:>8} {} {}{}\n",
                format_mode(e.typeflag, e.mode),
                og,
                e.size,
                tstr,
-               e.name,
-               (e.typeflag == SYMTYPE ? " -> " + e.linkname : ""));
+               qname,
+               (e.typeflag == SYMTYPE ? " -> " + qlink : ""));
     std::FILE* out = g_index_fp ? g_index_fp : stdout;
     std::fputs(line.c_str(), out);
 }
@@ -2789,7 +2960,7 @@ static int op_list(const Config& cfg) {
                             continue;
                         if (cfg.block_number)
                             print("{}: ", ie.offset / BLOCKSIZE);
-                        print("{}\n", display_name);
+                        print("{}\n", quote_name(display_name, cfg.quoting_style));
                         total_bytes += ie.size;
                     }
                     if (cfg.totals)
@@ -2862,7 +3033,7 @@ static int op_list(const Config& cfg) {
         else {
             if (cfg.block_number)
                 print("{}: ", reader.block_no() - 1);
-            print("{}\n", display_name);
+            print("{}\n", quote_name(display_name, cfg.quoting_style));
         }
 
         total_bytes += (e.asize + BLOCKSIZE - 1) / BLOCKSIZE * BLOCKSIZE;
@@ -2954,34 +3125,48 @@ static int op_create(const Config& cfg) {
                              group_map.empty() ? nullptr : &group_map);
 
     // Load incremental snapshot (for --listed-incremental with --level >= 1)
-    std::map<std::string, std::int64_t> snapshot_map;  // name → mtime_sec (from previous snapshot)
+    // Format: MUTAR_SNAPSHOT_V1 → name\tmtime
+    //         MUTAR_SNAPSHOT_V2 → name\tmtime\tdev  (device for --check-device)
+    std::map<std::string, SnapRec> snapshot_map;
     bool do_incremental = !cfg.listed_incremental.empty() && cfg.level >= 1;
     if (do_incremental) {
         std::ifstream snap_in(cfg.listed_incremental);
         if (snap_in) {
             std::string header;
-            std::getline(snap_in, header);  // consume MUTAR_SNAPSHOT_V1 header line
+            std::getline(snap_in, header);  // consume MUTAR_SNAPSHOT_V* header
             std::string line;
             while (std::getline(snap_in, line)) {
                 auto tab = line.find('\t');
                 if (tab == std::string::npos) continue;
                 std::string sname = line.substr(0, tab);
-                std::string smts  = line.substr(tab + 1);
+                std::string rest  = line.substr(tab + 1);
+                SnapRec rec{};
+                auto tab2 = rest.find('\t');
+                std::string smts = (tab2 == std::string::npos) ? rest : rest.substr(0, tab2);
                 char* endp = nullptr; errno = 0;
-                std::int64_t mt = std::strtoll(smts.c_str(), &endp, 10);
-                if (endp == smts.c_str() || *endp != '\0' || errno != 0) {
+                rec.mtime = std::strtoll(smts.c_str(), &endp, 10);
+                if (endp == smts.c_str() || (*endp != '\0' && *endp != '\t') || errno != 0) {
                     print(stderr, "mutar: snapshot: malformed mtime entry '{}'; skipping\n", line);
                     continue;
                 }
-                snapshot_map[sname] = mt;
+                if (tab2 != std::string::npos) {
+                    std::string sdev = rest.substr(tab2 + 1);
+                    char* dend = nullptr; errno = 0;
+                    unsigned long long dv = std::strtoull(sdev.c_str(), &dend, 10);
+                    if (dend != sdev.c_str() && *dend == '\0' && errno == 0) {
+                        rec.dev = static_cast<std::uint64_t>(dv);
+                        rec.has_dev = true;
+                    }
+                }
+                snapshot_map[sname] = rec;
             }
         } else {
             // Snapshot file missing → archive all (treat as level 0)
             do_incremental = false;
         }
     }
-    // Collect entries for snapshot write/update
-    std::vector<std::pair<std::string, std::int64_t>> snapshot_entries;
+    // Collect entries for snapshot write/update (files + directories + specials)
+    std::vector<std::pair<std::string, SnapRec>> snapshot_entries;
 
     // Change directory if requested
     if (!cfg.directory.empty()) {
@@ -3045,13 +3230,23 @@ static int op_create(const Config& cfg) {
                 }
             }
         }
-        // Incremental filter: skip files that haven't changed since last snapshot
+        // Incremental filter: skip regular files unchanged since last snapshot.
+        // Directories/symlinks/specials are always archived (GNU-like dump of
+        // metadata); they are still recorded in the snapshot for future use.
+        // With --check-device (default), a changed st_dev forces re-archive.
         if (do_incremental) {
             struct stat inc_st{};
             if (::lstat(fspath.c_str(), &inc_st) == 0 && S_ISREG(inc_st.st_mode)) {
                 auto sit = snapshot_map.find(raw_archname);
-                if (sit != snapshot_map.end() && inc_st.st_mtime <= sit->second)
-                    return; // unchanged file, skip
+                if (sit != snapshot_map.end() &&
+                    inc_st.st_mtime <= sit->second.mtime) {
+                    bool dev_changed = false;
+                    if (cfg.check_device && sit->second.has_dev &&
+                        static_cast<std::uint64_t>(inc_st.st_dev) != sit->second.dev)
+                        dev_changed = true;
+                    if (!dev_changed)
+                        return; // unchanged file, skip
+                }
             }
         }
 
@@ -3102,12 +3297,16 @@ static int op_create(const Config& cfg) {
             if (g_index_fp) std::fprintf(g_index_fp, "%s\n", archname.c_str());
         }
 
-        // Track file for snapshot update
+        // Track path for snapshot update (regular files, dirs, symlinks, specials)
         if (!cfg.listed_incremental.empty()) {
             struct stat snap_st{};
-            if (::lstat(fspath.c_str(), &snap_st) == 0)
-                snapshot_entries.emplace_back(raw_archname,
-                                              static_cast<std::int64_t>(snap_st.st_mtime));
+            if (::lstat(fspath.c_str(), &snap_st) == 0) {
+                SnapRec rec;
+                rec.mtime   = static_cast<std::int64_t>(snap_st.st_mtime);
+                rec.dev     = static_cast<std::uint64_t>(snap_st.st_dev);
+                rec.has_dev = true;
+                snapshot_entries.emplace_back(raw_archname, rec);
+            }
         }
 
         // Multi-volume: refuse members larger than tape length (no mid-file split).
@@ -3189,12 +3388,12 @@ static int op_create(const Config& cfg) {
         }
     }
 
-    // Write/update incremental snapshot file
+    // Write/update incremental snapshot file (V2: name\tmtime\tdev)
     if (!cfg.listed_incremental.empty() && exit_code == EXIT_SUCCESS) {
         // Merge archived entries into existing snapshot (for level >= 1 incremental)
-        std::map<std::string, std::int64_t> snap_out = snapshot_map;
-        for (auto& [sname, smt] : snapshot_entries)
-            snap_out[sname] = smt;
+        std::map<std::string, SnapRec> snap_out = snapshot_map;
+        for (auto& [sname, srec] : snapshot_entries)
+            snap_out[sname] = srec;
 
         // Atomic write via mkstemp
         std::string tmp_tmpl = cfg.listed_incremental + ".XXXXXX";
@@ -3205,9 +3404,16 @@ static int op_create(const Config& cfg) {
         if (snap_fd >= 0) {
             FILE* snap_fp = ::fdopen(snap_fd, "w");
             if (snap_fp) {
-                std::fprintf(snap_fp, "MUTAR_SNAPSHOT_V1\n");
-                for (auto& [sn, sm] : snap_out)
-                    std::fprintf(snap_fp, "%s\t%lld\n", sn.c_str(), (long long)sm);
+                std::fprintf(snap_fp, "MUTAR_SNAPSHOT_V2\n");
+                for (auto& [sn, sm] : snap_out) {
+                    if (sm.has_dev)
+                        std::fprintf(snap_fp, "%s\t%lld\t%llu\n", sn.c_str(),
+                                     static_cast<long long>(sm.mtime),
+                                     static_cast<unsigned long long>(sm.dev));
+                    else
+                        std::fprintf(snap_fp, "%s\t%lld\n", sn.c_str(),
+                                     static_cast<long long>(sm.mtime));
+                }
                 std::fclose(snap_fp);
                 if (::rename(tmp_path.c_str(), cfg.listed_incremental.c_str()) < 0) {
                     print(stderr, "mutar: cannot rename snapshot '{}': {}\n",
@@ -3746,8 +3952,9 @@ static int op_extract(const Config& cfg) {
 
             // --backup: rename existing file before overwriting
             if (cfg.backup && exists && !cfg.keep_old_files && !cfg.skip_old_files) {
-                std::string bak = outpath + cfg.backup_suffix;
-                ::rename(outpath.c_str(), bak.c_str());
+                std::string bak = make_backup_path(outpath, cfg);
+                if (!bak.empty())
+                    ::rename(outpath.c_str(), bak.c_str());
             }
 
             int fd = ::open(outpath.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0666);
@@ -4780,12 +4987,17 @@ static Config parse_args(int argc, char* argv[]) {
             break;
         }
 
+        case OPT_CHECK_DEVICE:
+            cfg.check_device = true;
+            break;
+        case OPT_NO_CHECK_DEVICE:
+            cfg.check_device = false;
+            break;
+
         // Accepted but no-op for now (complex features not yet implemented)
         case OPT_IGNORE_CMD_ERR:
         case OPT_NO_IGNORE_CMD_ERR:
         case OPT_INFO_SCRIPT: // longopt maps to 'F'
-        case OPT_CHECK_DEVICE:
-        case OPT_NO_CHECK_DEVICE:
         case OPT_NO_SAME_ATTR:
         case OPT_REWIND:
         case OPT_AFTER_DATE:
@@ -4875,13 +5087,15 @@ static Config parse_args(int argc, char* argv[]) {
         case OPT_BACKUP:
             if (::optarg) {
                 cfg.backup_control = ::optarg;
+                std::string norm = normalize_backup_control(cfg.backup_control);
                 // "none" / "off" explicitly disables backups
-                if (cfg.backup_control == "none" || cfg.backup_control == "off")
-                    cfg.backup = false;
-                else
-                    cfg.backup = true;
+                cfg.backup = (norm != "none");
+                cfg.backup_control = norm;
             } else {
+                // Bare --backup: simple suffix rename (GNU default when unset is existing)
                 cfg.backup = true;
+                if (cfg.backup_control.empty())
+                    cfg.backup_control = "simple";
             }
             break;
         case OPT_SUFFIX:
@@ -4998,14 +5212,16 @@ static void print_usage(const char* prog) {
         "  -u, --update                    Only append files newer than copy in archive\n"
         "  -x, --extract, --get            Extract files from an archive\n"
         "\nOperation modifiers:\n"
-        "      --check-device              Check device numbers when creating incremental archives (default)\n"
+        "      --check-device              Check device numbers in listed-incremental snapshot (default)\n"
         "  -g, --listed-incremental=FILE   Handle new GNU-format incremental backup\n"
+        "                                  Snapshot records files+dirs (mtime+dev); skip filter is\n"
+        "                                  regular-file mtime (+dev when --check-device); dirs always dumped\n"
         "  -G, --incremental               Handle old GNU-format incremental backup\n"
         "      --hole-detection=METHOD     Use METHOD to detect holes in sparse files (seek/raw)\n"
         "      --ignore-failed-read        Do not exit with nonzero on unreadable files\n"
         "      --level=NUMBER              Dump level for created listed-incremental archive\n"
         "  -n, --seek                      Archive is seekable\n"
-        "      --no-check-device           Do not check device numbers when creating incremental archives\n"
+        "      --no-check-device           Ignore device field in listed-incremental snapshot\n"
         "      --no-seek                   Archive is not seekable\n"
         "      --occurrence[=NUMBER]       Process only the NUMBERth occurrence of each file in the archive\n"
         "      --sparse-version=MAJOR[.MINOR]  Set version of the sparse format to use\n"
@@ -5078,6 +5294,7 @@ static void print_usage(const char* prog) {
         "                                  between-member rotation only (no mid-file split)\n"
         "  -M, --multi-volume              Create/list/extract multi-volume archive\n"
         "      --rmt-command=COMMAND       Use given rmt COMMAND instead of rmt\n"
+        "                                  (O/R/W/C only; rmt lseek/S and remote append not supported)\n"
         "      --rsh-command=COMMAND       Use remote COMMAND instead of rsh\n"
         "      --volno-file=F              Read/write current volume number in F (atomic)\n"
         "\nDevice blocking:\n"
@@ -5105,7 +5322,9 @@ static void print_usage(const char* prog) {
         "      --zstd                      Filter the archive through zstd\n"
         "\nLocal file selection:\n"
         "      --add-file=FILE             Add given FILE to the archive\n"
-        "      --backup[=CONTROL]          Backup before removal, choose version CONTROL\n"
+        "      --backup[=CONTROL]          Backup before overwrite on extract; CONTROL:\n"
+        "                                  none/off, simple/never (suffix), numbered/t (file.~N~),\n"
+        "                                  existing/nil (numbered if .~1~ exists else simple)\n"
         "  -C, --directory=DIR             Change to directory DIR\n"
         "      --exclude=PATTERN           Exclude files matching PATTERN\n"
         "      --exclude-backups           Exclude backup and lock files\n"
@@ -5153,9 +5372,10 @@ static void print_usage(const char* prog) {
         "                                  Compressed extract materializes once then seeks via index\n"
         "      --no-quote-chars=STRING     Disable quoting for characters from STRING\n"
         "      --quote-chars=STRING        Additionally quote characters from STRING\n"
-        "      --quoting-style=STYLE       Set name quoting style\n"
+        "      --quoting-style=STYLE       Set name quoting for -t / verbose extract\n"
+        "                                  (literal, escape, c, c-maybe, shell, shell-always)\n"
         "  -R, --block-number              Show block number within archive with each message\n"
-        "      --restrict                  Disable use of some potentially harmful options\n"
+        "      --restrict                  Forbid -P/--absolute-names, --to-command, multi-volume\n"
         "      --show-defaults             Show tar defaults\n"
         "      --show-omitted-dirs         When listing or extracting, list each directory that does not match search criteria\n"
         "      --show-stored-names         Same as --show-transformed-names\n"
@@ -5205,6 +5425,10 @@ int main(int argc, char* argv[]) {
                            "'--delete' or '--test-label' options\n");
         return EXIT_FAILURE;
     }
+
+    // --restrict: reject dangerous option combinations before any I/O
+    if (!enforce_restrict(cfg))
+        return EXIT_FAILURE;
 
     switch (cfg.op) {
     case Operation::Create:    return op_create(cfg);

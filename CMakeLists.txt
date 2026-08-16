@@ -219,6 +219,13 @@ add_test(
   WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
 )
 
+# Phase E polish: --restrict, --backup CONTROL, --quoting-style, --check-device (G10–G15)
+add_test(
+  NAME mutar_phase_e_tests
+  COMMAND bash ${CMAKE_SOURCE_DIR}/tests/test_phase_e.sh $<TARGET_FILE:mutar>
+  WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+)
+
 # Boundary / overflow / memory tests binary
 # Compiled with AddressSanitizer + UndefinedBehaviorSanitizer so any OOB
 # access, integer overflow, use-after-free, etc. are caught at runtime.

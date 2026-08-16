@@ -102,8 +102,10 @@ echo "[T-INCR-02]"
     else
         LINES="$(wc -l < "$SNAP")"
         HEAD="$(head -1 "$SNAP")"
-        if [ "$HEAD" = "MUTAR_SNAPSHOT_V1" ] && [ "$LINES" -ge 2 ]; then
-            pass "T-INCR-02: snapshot file created with correct format ($LINES lines)"
+        # Phase E: V2 adds device field; V1 still readable by mutar
+        if { [ "$HEAD" = "MUTAR_SNAPSHOT_V1" ] || [ "$HEAD" = "MUTAR_SNAPSHOT_V2" ]; } \
+           && [ "$LINES" -ge 2 ]; then
+            pass "T-INCR-02: snapshot file created with correct format ($HEAD, $LINES lines)"
         else
             fail "T-INCR-02" "snapshot malformed: head='$HEAD' lines=$LINES"
         fi
