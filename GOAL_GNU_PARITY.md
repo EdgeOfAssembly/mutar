@@ -1,6 +1,6 @@
 # µtar (mutar) — GOAL: 100% GNU tar CLI (except SELinux)
 
-**Status:** Phases 1–7 complete; Phase 8 honesty/docs in progress  
+**Status:** Phases 1–8 complete (residuals closed); SELinux policy exception only  
 **Date:** 2026-08-16 (updated 2026-08-17)  
 **Owner:** EdgeOfAssembly  
 **Local tree:** `/tmp/mutar`  
@@ -337,7 +337,7 @@ Report after each phase: commits, tests+exit codes, residual gaps.
 - [x] G1.13–G1.16 atime-preserve, totals SIGNAL, `-o` create, quoting styles  
 - [x] G1.17 `--preserve` long option  
 - [x] G2 SELinux still policy no-op only  
-- [ ] Phase 8 parity report = **YES** (except SELinux)  
+- [x] Phase 8 parity report = **YES** (except SELinux) — residuals closed 2026-08-17  
 - [ ] Phase 9 multiagent Debug QA SHIP  
 - [ ] Tag **v0.3.0** pushed + durable  
 

@@ -220,7 +220,9 @@ struct Config {
     std::vector<std::string> files;      // positional arguments
     std::string label;                   // -V / --label
     std::string listed_incremental;      // -g
-    std::string newer_than;              // -N / --newer
+    std::string newer_than;              // -N / --newer / --newer-mtime
+    /// GNU: --newer / -N / --after-date filter by ctime; --newer-mtime by mtime.
+    bool        newer_use_ctime = false;
     std::string mtime;                   // --mtime
     std::string owner;                   // --owner
     std::string group;                   // --group

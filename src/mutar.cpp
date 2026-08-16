@@ -70,6 +70,9 @@ using mutar_compat::print;
 
 namespace mutar {
 
+// Forward decl: used by ArchiveStream before the full definition.
+static void mutar_warn(const Config& cfg, std::string_view category, std::string_view msg);
+
 // Index file for --index-file (verbose output redirection)
 static FILE* g_index_fp = nullptr;
 
@@ -228,6 +231,100 @@ static bool parse_sparse_version(const char* s, unsigned& major, unsigned& minor
         return false;
     major = static_cast<unsigned>(maj);
     minor = static_cast<unsigned>(min);
+    return true;
+}
+
+/// Apply GNU-style --mode=CHANGES (octal or symbolic) to @p mode.
+/// Symbolic clauses: [ugoa]*[+-=][rwxXstugo]* separated by commas.
+/// @p st_mode is the full st_mode (type + perms) for relative +/− and 'X'.
+/// @return false if @p mode_str is empty or unparseable.
+static bool apply_mode_changes(unsigned& mode, const std::string& mode_str,
+                               mode_t st_mode) {
+    if (mode_str.empty())
+        return false;
+
+    // Pure octal (optional leading 0): e.g. 640, 0755
+    {
+        char* endp = nullptr;
+        errno = 0;
+        long m = std::strtol(mode_str.c_str(), &endp, 8);
+        if (endp && *endp == '\0' && errno == 0 && m >= 0 && m <= 07777) {
+            mode = static_cast<unsigned>(m) & 07777;
+            return true;
+        }
+    }
+
+    unsigned result = static_cast<unsigned>(st_mode) & 07777;
+    const bool is_dir = S_ISDIR(st_mode);
+    const char* p = mode_str.c_str();
+    while (*p) {
+        while (*p == ',' || std::isspace(static_cast<unsigned char>(*p)))
+            ++p;
+        if (!*p)
+            break;
+
+        // who: default a if omitted before op
+        unsigned who = 0;
+        bool who_set = false;
+        while (*p == 'u' || *p == 'g' || *p == 'o' || *p == 'a') {
+            who_set = true;
+            if (*p == 'u') who |= 04700;      // rwxu + setuid
+            else if (*p == 'g') who |= 02070; // rwxg + setgid
+            else if (*p == 'o') who |= 01007; // rwxo + sticky
+            else who |= 07777;                // a
+            ++p;
+        }
+        if (!who_set)
+            who = 07777;
+
+        char op = *p;
+        if (op != '+' && op != '-' && op != '=')
+            return false;
+        ++p;
+
+        unsigned perms = 0;
+        bool copy_u = false, copy_g = false, copy_o = false;
+        while (*p && *p != ',') {
+            char c = *p++;
+            switch (c) {
+            case 'r': perms |= 0444; break;
+            case 'w': perms |= 0222; break;
+            case 'x': perms |= 0111; break;
+            case 'X':
+                // Execute only if directory or any execute bit already set
+                if (is_dir || (result & 0111))
+                    perms |= 0111;
+                break;
+            case 's': perms |= 06000; break;
+            case 't': perms |= 01000; break;
+            case 'u': copy_u = true; break;
+            case 'g': copy_g = true; break;
+            case 'o': copy_o = true; break;
+            default:
+                if (std::isspace(static_cast<unsigned char>(c)))
+                    continue;
+                return false;
+            }
+        }
+
+        if (copy_u || copy_g || copy_o) {
+            unsigned src = 0;
+            if (copy_u) src = (result >> 6) & 7;
+            else if (copy_g) src = (result >> 3) & 7;
+            else src = result & 7;
+            perms |= (src << 6) | (src << 3) | src;
+        }
+
+        unsigned bits = perms & who;
+        if (op == '+') {
+            result |= bits;
+        } else if (op == '-') {
+            result &= ~bits;
+        } else { // '='
+            result = (result & ~who) | bits;
+        }
+    }
+    mode = result & 07777;
     return true;
 }
 
@@ -575,13 +672,49 @@ public:
         }
 
         if (comp != Compress::None && comp != Compress::Auto) {
-            if (s.rmt_) {
-                return std::unexpected(msg_error(
-                    "compressed remote archives via rmt are not supported"));
-            }
             const char* prog = compress_prog_for(comp, cfg.compress_prog);
             if (!prog || !prog[0])
                 return std::unexpected(msg_error("unknown compression program"));
+
+            // Remote + compress: download compressed bytes to a local temp, then
+            // decompress from that file (rmt is not a plain fd for execl).
+            if (s.rmt_) {
+                char tmpl[] = "/tmp/mutar_rcmp_XXXXXX";
+                int tfd = ::mkstemp(tmpl);
+                if (tfd < 0)
+                    return std::unexpected(sys_error("mkstemp for remote compress"));
+                char buf[1 << 16];
+                for (;;) {
+                    ssize_t n = s.rmt_->read(buf, sizeof(buf));
+                    if (n < 0) {
+                        ::close(tfd); ::unlink(tmpl);
+                        return std::unexpected(msg_error(
+                            "remote read failed while materializing compressed archive"));
+                    }
+                    if (n == 0) break;
+                    std::size_t off = 0;
+                    while (off < static_cast<std::size_t>(n)) {
+                        ssize_t w = ::write(tfd, buf + off,
+                                            static_cast<std::size_t>(n) - off);
+                        if (w < 0) {
+                            if (errno == EINTR) continue;
+                            ::close(tfd); ::unlink(tmpl);
+                            return std::unexpected(sys_error("write remote materialize"));
+                        }
+                        off += static_cast<std::size_t>(w);
+                    }
+                }
+                s.rmt_->close();
+                s.rmt_.reset();
+                s.child_pid_ = -1;
+                if (::lseek(tfd, 0, SEEK_SET) < 0) {
+                    ::close(tfd); ::unlink(tmpl);
+                    return std::unexpected(sys_error("lseek remote materialize"));
+                }
+                s.fd_ = tfd;
+                s.owns_fd_ = true;
+                s.temp_unlink_ = tmpl;
+            }
 
             // Pipe: fd_  → prog -d → child_pipe[read-end]
             int pipefd[2];
@@ -604,6 +737,7 @@ public:
             s.fd_ = pipefd[0];
             s.owns_fd_ = true;
             s.child_pid_ = pid;
+            // temp_unlink_ kept until close() so the child can still read it
         }
         return s;
     }
@@ -622,9 +756,26 @@ public:
                 comp = detect_compress(cfg.archive_file);
         }
 
+        // Remote + compress: write compressed stream to a local temp, upload via
+        // rmt on close(). Plain remote (no compress) still uses live rmt.
+        const bool remote = !use_stdout
+            && is_remote_archive(cfg.archive_file, cfg.force_local);
+        const bool want_compress = (comp != Compress::None && comp != Compress::Auto);
+
         if (use_stdout) {
             s.fd_ = STDOUT_FILENO;
-        } else if (is_remote_archive(cfg.archive_file, cfg.force_local)) {
+        } else if (remote && want_compress) {
+            char tmpl[] = "/tmp/mutar_wcmp_XXXXXX";
+            int tfd = ::mkstemp(tmpl);
+            if (tfd < 0)
+                return std::unexpected(sys_error("mkstemp for remote compress write"));
+            s.fd_ = tfd;
+            s.owns_fd_ = true;
+            s.temp_unlink_ = tmpl;
+            s.remote_upload_ = cfg.archive_file;
+            s.rsh_command_ = cfg.rsh_command;
+            s.rmt_command_ = cfg.rmt_command;
+        } else if (remote) {
             // Remote create: O_WRONLY|O_CREAT|O_TRUNC via rmt
             int flags = O_WRONLY | O_CREAT | O_TRUNC;
             auto rmt = RmtSession::connect_and_open(
@@ -640,11 +791,7 @@ public:
             s.owns_fd_ = true;
         }
 
-        if (comp != Compress::None && comp != Compress::Auto) {
-            if (s.rmt_) {
-                return std::unexpected(msg_error(
-                    "compressed remote archives via rmt are not supported"));
-            }
+        if (want_compress) {
             const char* prog = compress_prog_for(comp, cfg.compress_prog);
             if (!prog || !prog[0])
                 return std::unexpected(msg_error("unknown compression program"));
@@ -653,10 +800,10 @@ public:
             if (cfg.seekable) {
                 if (comp == Compress::Gzip || comp == Compress::Bzip2 ||
                     comp == Compress::CompressZ || comp == Compress::Lzop) {
-                    print(stderr,
-                          "mutar: warning: --seekable with {} still needs full "
-                          "decompress for random access (solid stream)\n",
-                          prog);
+                    mutar_warn(cfg, "compress",
+                        std::format("--seekable with {} still needs full "
+                                    "decompress for random access (solid stream)",
+                                    prog));
                 }
             }
 
@@ -784,7 +931,11 @@ public:
     ArchiveStream(ArchiveStream&& o) noexcept
         : fd_(o.fd_), owns_fd_(o.owns_fd_), child_pid_(o.child_pid_),
           patch_fd_(o.patch_fd_), patch_mtime_(o.patch_mtime_),
-          rmt_(std::move(o.rmt_)) {
+          rmt_(std::move(o.rmt_)),
+          temp_unlink_(std::move(o.temp_unlink_)),
+          remote_upload_(std::move(o.remote_upload_)),
+          rsh_command_(std::move(o.rsh_command_)),
+          rmt_command_(std::move(o.rmt_command_)) {
         o.fd_ = -1; o.owns_fd_ = false; o.child_pid_ = -1;
         o.patch_fd_ = -1; o.patch_mtime_ = 0;
     }
@@ -794,6 +945,10 @@ public:
             fd_ = o.fd_; owns_fd_ = o.owns_fd_; child_pid_ = o.child_pid_;
             patch_fd_ = o.patch_fd_; patch_mtime_ = o.patch_mtime_;
             rmt_ = std::move(o.rmt_);
+            temp_unlink_ = std::move(o.temp_unlink_);
+            remote_upload_ = std::move(o.remote_upload_);
+            rsh_command_ = std::move(o.rsh_command_);
+            rmt_command_ = std::move(o.rmt_command_);
             o.fd_ = -1; o.owns_fd_ = false; o.child_pid_ = -1;
             o.patch_fd_ = -1; o.patch_mtime_ = 0;
         }
@@ -816,6 +971,7 @@ public:
             rmt_.reset();
             child_pid_ = -1;
         }
+        // Close write end of compressor pipe first so the child can finish.
         if (owns_fd_ && fd_ >= 0) { ::close(fd_); fd_ = -1; owns_fd_ = false; }
         if (child_pid_ > 0) {
             int st = 0;
@@ -840,6 +996,35 @@ public:
                 ::close(patch_fd_);
                 patch_fd_ = -1;
             }
+        }
+        // Deferred remote upload of compressed temp (create -z -f host:path)
+        if (!remote_upload_.empty() && !temp_unlink_.empty()) {
+            auto rmt = RmtSession::connect_and_open(
+                remote_upload_, rsh_command_, rmt_command_,
+                O_WRONLY | O_CREAT | O_TRUNC);
+            if (rmt) {
+                int rfd = ::open(temp_unlink_.c_str(), O_RDONLY);
+                if (rfd >= 0) {
+                    char buf[1 << 16];
+                    for (;;) {
+                        ssize_t n = ::read(rfd, buf, sizeof(buf));
+                        if (n < 0) { if (errno == EINTR) continue; break; }
+                        if (n == 0) break;
+                        if (!rmt->write(buf, static_cast<std::size_t>(n)))
+                            break;
+                    }
+                    ::close(rfd);
+                }
+                rmt->close();
+            } else {
+                print(stderr, "mutar: warning: failed to upload compressed archive to '{}'\n",
+                      remote_upload_);
+            }
+            remote_upload_.clear();
+        }
+        if (!temp_unlink_.empty()) {
+            ::unlink(temp_unlink_.c_str());
+            temp_unlink_.clear();
         }
     }
 
@@ -901,6 +1086,10 @@ private:
     int   patch_fd_  = -1;       // dup of output fd for gzip mtime patching
     time_t patch_mtime_ = 0;     // archive creation time to embed in gzip header
     std::unique_ptr<RmtSession> rmt_;
+    std::string temp_unlink_;    // local temp for remote+compress materialize
+    std::string remote_upload_;  // host:path to upload temp_unlink_ on close
+    std::string rsh_command_;
+    std::string rmt_command_;
 };
 
 // ── Block buffer (blocking-factor–aligned I/O) ───────────────────────────────
@@ -1830,6 +2019,7 @@ static void apply_owner_map(Entry& e,
 
 // ── Warning emission helper ───────────────────────────────────────────────────
 
+// Forward-declared earlier for ArchiveStream; definition here.
 // Emit a warning message, respecting --warning=none/all/KEYWORD/no-KEYWORD.
 // category: short string like "failed-read", "newer", "missing-links", "xdev"
 static void mutar_warn(const Config& cfg, std::string_view category, std::string_view msg) {
@@ -1963,6 +2153,9 @@ public:
                   bool read_full_records = false)
         : stream_(&s), buf_(blocking, read_full_records), ignore_zeros_(ignore_zeros) {}
 
+    /// Optional Config for --warning filtering of reader-side messages.
+    void set_warn_config(const Config* cfg) { warn_cfg_ = cfg; }
+
     /// Apply --pax-option rules on read (delete=, keyword=/:= overrides).
     void set_pax_rules(const PaxOptionRules* rules) {
         pax_rules_ = rules;
@@ -2007,8 +2200,13 @@ public:
             }
 
             if (!valid_checksum(blk)) {
-                print(stderr, "mutar: invalid block checksum at block {}\n",
-                           buf_.block_no());
+                if (warn_cfg_)
+                    mutar_warn(*warn_cfg_, "checksum",
+                               std::format("invalid block checksum at block {}",
+                                           buf_.block_no()));
+                else
+                    print(stderr, "mutar: invalid block checksum at block {}\n",
+                          buf_.block_no());
                 return {{}, false, false};
             }
 
@@ -2269,7 +2467,11 @@ public:
                     e.sparse_map.clear();
                     e.is_sparse = false;
                 }
-                print(stderr, "mutar: warning: ignoring malformed pax field '{}'\n", k);
+                if (warn_cfg_)
+                    mutar_warn(*warn_cfg_, "unknown-keyword",
+                               std::format("ignoring malformed pax field '{}'", k));
+                else
+                    print(stderr, "mutar: warning: ignoring malformed pax field '{}'\n", k);
             }
         }
         e.asize = e.size; // may be overridden by sparse
@@ -2307,6 +2509,7 @@ public:
     ArchiveStream* stream_;
     BlockBuffer    buf_;
     bool           ignore_zeros_ = false;
+    const Config*  warn_cfg_ = nullptr;
     const PaxOptionRules* pax_rules_ = nullptr;
     std::map<std::string, std::string> cli_global_pax_;
     std::map<std::string, std::string> archive_global_pax_;
@@ -2435,11 +2638,11 @@ public:
                 }
             }
         }
-        // --mode: override permissions for all entry types (octal string)
+        // --mode: override permissions (octal or GNU symbolic: u+x,go-w,a=r,…)
         if (!cfg.mode_str.empty()) {
-            char* endp = nullptr;
-            long m = std::strtol(cfg.mode_str.c_str(), &endp, 8);
-            if (endp && *endp == '\0' && m >= 0) e.mode = static_cast<unsigned>(m) & 07777;
+            unsigned new_mode = e.mode;
+            if (apply_mode_changes(new_mode, cfg.mode_str, st.st_mode))
+                e.mode = new_mode;
         }
 
         // Collect xattrs / ACLs into e.pax_attrs as SCHILY.* (before any write path).
@@ -2733,6 +2936,86 @@ private:
         return !io_error;
     }
 
+    /// Emit one data block with mid-file multi-volume rotation if needed.
+    /// @p arch_offset is bytes of sparse payload already committed.
+    bool emit_sparse_data_block(Entry& e, const Config& cfg,
+                                std::int64_t& arch_offset,
+                                std::int64_t arch_size,
+                                const Block& b) {
+        if (max_blocks_ > 0 && buf_.block_no() >= max_blocks_) {
+            buf_.flush(*stream_);
+            if (!rotate_ || !rotate_(true))
+                return false;
+            Entry cont = e;
+            cont.typeflag = GNUTYPE_MULTIVOL;
+            cont.multivol_offset = arch_offset;
+            cont.size  = arch_size - arch_offset;
+            cont.asize = cont.size;
+            cont.is_sparse = false;
+            cont.sparse_map.clear();
+            Block cblk = encode_header(cont, cfg);
+            buf_.write_block(*stream_, cblk);
+        }
+        buf_.write_block(*stream_, b);
+        // Each archive data block advances by up to BLOCKSIZE of payload;
+        // caller tracks exact byte count for the final partial block.
+        return true;
+    }
+
+    /// Write concatenated sparse data segments as archive payload blocks.
+    /// Supports mid-file multi-volume (GNUTYPE_MULTIVOL) like write_regular.
+    bool write_sparse_payload(int fd, const std::vector<SparseSegment>& segs,
+                              Entry& e, const Config& cfg,
+                              std::int64_t arch_size) {
+        std::int64_t arch_offset = 0;
+        Block b{};
+        std::memset(b.buffer, 0, BLOCKSIZE);
+        std::size_t buf_filled = 0;
+        bool ok = true;
+
+        for (auto& seg : segs) {
+            if (::lseek(fd, static_cast<off_t>(seg.offset), SEEK_SET) < 0) {
+                ok = false;
+                break;
+            }
+            std::int64_t seg_rem = seg.length;
+            while (seg_rem > 0) {
+                std::size_t space = BLOCKSIZE - buf_filled;
+                if (space == 0) {
+                    if (!emit_sparse_data_block(e, cfg, arch_offset, arch_size, b)) {
+                        ok = false;
+                        break;
+                    }
+                    arch_offset += BLOCKSIZE;
+                    std::memset(b.buffer, 0, BLOCKSIZE);
+                    buf_filled = 0;
+                    space = BLOCKSIZE;
+                }
+                std::int64_t to_read = std::min<std::int64_t>(
+                    seg_rem, static_cast<std::int64_t>(space));
+                ssize_t got = 0;
+                while (got < to_read) {
+                    ssize_t n = ::read(fd, b.buffer + buf_filled + got,
+                                       static_cast<std::size_t>(to_read - got));
+                    if (n < 0) { if (errno == EINTR) continue; ok = false; break; }
+                    if (n == 0) { ok = false; break; }
+                    got += n;
+                }
+                if (!ok) break;
+                buf_filled += static_cast<std::size_t>(got);
+                seg_rem    -= got;
+            }
+            if (!ok) break;
+        }
+
+        if (ok && buf_filled > 0) {
+            if (!emit_sparse_data_block(e, cfg, arch_offset, arch_size, b))
+                return false;
+            arch_offset += static_cast<std::int64_t>(buf_filled);
+        }
+        return ok;
+    }
+
     // Write a GNU sparse ('S' type) entry using SEEK_DATA/SEEK_HOLE hole detection.
     bool write_sparse(Entry& e, const std::string& fspath,
                       const Config& cfg, const struct stat& st) {
@@ -2766,6 +3049,14 @@ private:
             idx_e.size = logical_size;
             idx_e.typeflag = GNUTYPE_SPARSE;
             record_index_entry(idx_e);
+        }
+
+        // Room for headers on this volume (between-member rotate if full)
+        if (max_blocks_ > 0 && buf_.block_no() >= max_blocks_) {
+            if (!rotate_ || !rotate_(false)) {
+                ::close(fd);
+                return false;
+            }
         }
 
         // Sparse 1.x: PAX extended header (GNU.sparse.*). Sparse 0.x: old GNU 'S' type.
@@ -2827,50 +3118,7 @@ private:
             write_checksum(hblk);
             buf_.write_block(*stream_, hblk);
 
-            // Write data: concatenate segment bytes into one stream, pad at end
-            bool ok = true;
-            Block b{};
-            std::memset(b.buffer, 0, BLOCKSIZE);
-            std::size_t buf_filled = 0;
-
-            for (auto& seg : segs) {
-                if (::lseek(fd, static_cast<off_t>(seg.offset), SEEK_SET) < 0) { ok = false; break; }
-                std::int64_t remaining = seg.length;
-                while (remaining > 0) {
-                    std::size_t space = BLOCKSIZE - buf_filled;
-                    if (space == 0) {
-                        buf_.write_block(*stream_, b);
-                        std::memset(b.buffer, 0, BLOCKSIZE);
-                        buf_filled = 0;
-                        space = BLOCKSIZE;
-                    }
-                    std::int64_t to_read = std::min<std::int64_t>(
-                        remaining, static_cast<std::int64_t>(space));
-                    ssize_t got = 0;
-                    while (got < to_read) {
-                        ssize_t n = ::read(fd, b.buffer + buf_filled + got,
-                                           static_cast<std::size_t>(to_read - got));
-                        if (n < 0) { if (errno == EINTR) continue; ok = false; break; }
-                        if (n == 0) { ok = false; break; }
-                        got += n;
-                    }
-                    if (!ok) break;
-                    buf_filled += static_cast<std::size_t>(got);
-                    remaining  -= got;
-                }
-                if (!ok) break;
-            }
-            if (ok && buf_filled > 0)
-                buf_.write_block(*stream_, b);
-            // Pad remaining blocks to fill the full logical block count
-            std::int64_t full_blocks  = arch_size / static_cast<std::int64_t>(BLOCKSIZE);
-            std::int64_t total_blocks = (arch_size + static_cast<std::int64_t>(BLOCKSIZE) - 1)
-                                        / static_cast<std::int64_t>(BLOCKSIZE);
-            std::int64_t written_blocks = full_blocks + (buf_filled > 0 ? 1 : 0);
-            for (std::int64_t pi = written_blocks; pi < total_blocks; ++pi) {
-                Block zb{}; buf_.write_block(*stream_, zb);
-            }
-
+            bool ok = write_sparse_payload(fd, segs, e, cfg, arch_size);
             ::close(fd);
             restore_atime_if_needed(fspath, cfg, st);
             return ok;
@@ -2925,50 +3173,7 @@ private:
             buf_.write_block(*stream_, ext);
         }
 
-        // Write data: concatenate segment bytes into one logical stream;
-        // carry partial blocks across segments and pad with zeros only once at the end.
-        bool ok = true;
-        Block b{};
-        std::memset(b.buffer, 0, BLOCKSIZE);
-        std::size_t buf_filled = 0;
-
-        for (auto& seg : segs) {
-            if (::lseek(fd, static_cast<off_t>(seg.offset), SEEK_SET) < 0) { ok = false; break; }
-            std::int64_t remaining = seg.length;
-            while (remaining > 0) {
-                std::size_t space = BLOCKSIZE - buf_filled;
-                if (space == 0) {
-                    buf_.write_block(*stream_, b);
-                    std::memset(b.buffer, 0, BLOCKSIZE);
-                    buf_filled = 0;
-                    space = BLOCKSIZE;
-                }
-                std::int64_t to_read = std::min<std::int64_t>(
-                    remaining, static_cast<std::int64_t>(space));
-                ssize_t got = 0;
-                while (got < to_read) {
-                    ssize_t n = ::read(fd, b.buffer + buf_filled + got,
-                                       static_cast<std::size_t>(to_read - got));
-                    if (n < 0) { if (errno == EINTR) continue; ok = false; break; }
-                    if (n == 0) { ok = false; break; } // unexpected EOF
-                    got += n;
-                }
-                if (!ok) break;
-                buf_filled += static_cast<std::size_t>(got);
-                remaining  -= static_cast<std::int64_t>(got);
-                if (buf_filled == BLOCKSIZE) {
-                    buf_.write_block(*stream_, b);
-                    std::memset(b.buffer, 0, BLOCKSIZE);
-                    buf_filled = 0;
-                }
-            }
-            if (!ok) break;
-        }
-
-        // Flush the last (potentially partial) block, padded with zeros, once.
-        if (ok && buf_filled > 0) {
-            buf_.write_block(*stream_, b);
-        }
+        bool ok = write_sparse_payload(fd, segs, e, cfg, arch_size);
         ::close(fd);
         restore_atime_if_needed(fspath, cfg, st);
         return ok;
@@ -3910,6 +4115,151 @@ static bool snap_unchanged(const SnapRec& rec, const struct stat& st,
     return true;
 }
 
+/// Read a NUL-terminated decimal integer from @p in. Returns false on EOF.
+static bool snap_read_num(std::istream& in, std::int64_t& out) {
+    std::string tok;
+    std::getline(in, tok, '\0');
+    if (!in && tok.empty())
+        return false;
+    if (tok.empty())
+        return false;
+    char* end = nullptr;
+    errno = 0;
+    long long v = std::strtoll(tok.c_str(), &end, 10);
+    if (errno || end == tok.c_str() || *end != '\0')
+        return false;
+    out = static_cast<std::int64_t>(v);
+    return true;
+}
+
+/// Read a NUL-terminated string from @p in.
+static bool snap_read_str(std::istream& in, std::string& out) {
+    std::getline(in, out, '\0');
+    return static_cast<bool>(in) || !out.empty();
+}
+
+/// Load GNU tar listed-incremental snapshot (format 0/1 text or 2 binary-NUL).
+/// Best-effort: maps dumpdir basenames to start_time so mutar's skip filter
+/// approximates GNU level≥1 (files with mtime ≤ dump start are unchanged).
+/// @return true if any entries were loaded.
+static bool load_gnu_snapshot(std::istream& in, const std::string& header,
+                              std::map<std::string, SnapRec>& snapshot_map) {
+    // Header: "GNU tar-<version>-<N>" where N is incremental format version
+    unsigned long incr_ver = 0;
+    {
+        auto dash = header.rfind('-');
+        if (dash == std::string::npos)
+            return false;
+        char* end = nullptr;
+        incr_ver = std::strtoul(header.c_str() + dash + 1, &end, 10);
+        if (end == header.c_str() + dash + 1)
+            return false;
+    }
+
+    std::int64_t start_sec = 0;
+
+    if (incr_ver >= 2) {
+        // Format 2: start_time sec\0 nsec\0 then directory records
+        std::int64_t start_nsec = 0;
+        if (!snap_read_num(in, start_sec) || !snap_read_num(in, start_nsec))
+            return false;
+        (void)start_nsec;
+
+        for (;;) {
+            std::int64_t nfs = 0;
+            if (!snap_read_num(in, nfs))
+                break; // normal EOF
+            std::int64_t mtime_sec = 0, mtime_nsec = 0, dev = 0, ino = 0;
+            if (!snap_read_num(in, mtime_sec) || !snap_read_num(in, mtime_nsec)
+                || !snap_read_num(in, dev) || !snap_read_num(in, ino))
+                break;
+            (void)mtime_nsec;
+            (void)ino;
+            (void)nfs;
+            std::string dirname;
+            if (!snap_read_str(in, dirname))
+                break;
+
+            // Dumpdir entries: "Yname" / "Nname" / "Dname" NUL-terminated,
+            // terminated by empty string then another empty (double NUL).
+            for (;;) {
+                std::string ent;
+                if (!snap_read_str(in, ent))
+                    break;
+                if (ent.empty()) {
+                    // record terminator: one more empty
+                    std::string term;
+                    (void)snap_read_str(in, term);
+                    break;
+                }
+                char tag = ent[0];
+                std::string base = ent.substr(1);
+                if (tag == 'D') {
+                    // subdirectory — directory itself always dumped by mutar
+                    continue;
+                }
+                if (tag != 'Y' && tag != 'N')
+                    continue;
+                std::string full = dirname;
+                if (!full.empty() && full.back() != '/' && !base.empty())
+                    full += '/';
+                full += base;
+                SnapRec rec{};
+                // Use dump start time as threshold (GNU-like: mtime ≤ start → skip)
+                rec.mtime = start_sec;
+                rec.dev = static_cast<std::uint64_t>(dev);
+                rec.has_dev = true;
+                // Also allow directory mtime as a floor if newer than start
+                if (mtime_sec > start_sec)
+                    rec.mtime = mtime_sec;
+                snapshot_map[full] = rec;
+            }
+            // Directory entry itself
+            {
+                SnapRec drec{};
+                drec.mtime = mtime_sec > 0 ? mtime_sec : start_sec;
+                drec.dev = static_cast<std::uint64_t>(dev);
+                drec.has_dev = true;
+                snapshot_map[dirname] = drec;
+            }
+        }
+        return !snapshot_map.empty() || start_sec > 0;
+    }
+
+    // Format 0/1: line-oriented (not fully implemented; accept header only)
+    (void)start_sec;
+    return false;
+}
+
+/// Load mutar MUTAR_SNAPSHOT_V1/V2 text snapshot into @p snapshot_map.
+static void load_mutar_snapshot(std::istream& in,
+                                std::map<std::string, SnapRec>& snapshot_map) {
+    std::string line;
+    while (std::getline(in, line)) {
+        auto tab = line.find('\t');
+        if (tab == std::string::npos) continue;
+        std::string sname = line.substr(0, tab);
+        std::string rest  = line.substr(tab + 1);
+        SnapRec rec{};
+        auto tab2 = rest.find('\t');
+        std::string smts = (tab2 == std::string::npos) ? rest : rest.substr(0, tab2);
+        char* endp = nullptr; errno = 0;
+        rec.mtime = std::strtoll(smts.c_str(), &endp, 10);
+        if (endp == smts.c_str() || (*endp != '\0' && *endp != '\t') || errno != 0)
+            continue;
+        if (tab2 != std::string::npos) {
+            std::string sdev = rest.substr(tab2 + 1);
+            char* dend = nullptr; errno = 0;
+            unsigned long long dv = std::strtoull(sdev.c_str(), &dend, 10);
+            if (dend != sdev.c_str() && *dend == '\0' && errno == 0) {
+                rec.dev = static_cast<std::uint64_t>(dv);
+                rec.has_dev = true;
+            }
+        }
+        snapshot_map[sname] = rec;
+    }
+}
+
 /// Build GNU dumpdir body for directory at @p fspath (archive name @p archname).
 /// Control codes: 'Y' = dump this non-dir, 'D' = subdirectory, 'N' = not dumped.
 /// @p snap / @p do_listed_inc control Y vs N for listed-incremental level≥1.
@@ -4185,8 +4535,9 @@ static int op_list(const Config& cfg) {
                         print(stderr, "Total bytes listed: {}\n", total_bytes);
                     return EXIT_SUCCESS;
                 }
-                print(stderr, "mutar: warning: cannot load index '{}': {}; scanning archive\n",
-                      idx_path, lr.error().message);
+                mutar_warn(cfg, "index",
+                    std::format("cannot load index '{}': {}; scanning archive",
+                                idx_path, lr.error().message));
             }
         }
     }
@@ -4198,6 +4549,7 @@ static int op_list(const Config& cfg) {
     }
     ArchiveStream& s = *res;
     ArchiveReader reader(s, cfg.blocking_factor, cfg.ignore_zeros, cfg.read_full_records);
+    reader.set_warn_config(&cfg);
     if (cfg.pax_option_rules.any())
         reader.set_pax_rules(&cfg.pax_option_rules);
 
@@ -4380,40 +4732,29 @@ static int op_create(const Config& cfg) {
                              group_map.empty() ? nullptr : &group_map);
 
     // Load incremental snapshot (for --listed-incremental with --level >= 1)
-    // Format: MUTAR_SNAPSHOT_V1 → name\tmtime
-    //         MUTAR_SNAPSHOT_V2 → name\tmtime\tdev  (device for --check-device)
+    // Detects: MUTAR_SNAPSHOT_V1/V2 text, or GNU tar "GNU tar-*-N" format 2.
     std::map<std::string, SnapRec> snapshot_map;
     bool do_incremental = !cfg.listed_incremental.empty() && cfg.level >= 1;
     if (do_incremental) {
-        std::ifstream snap_in(cfg.listed_incremental);
+        std::ifstream snap_in(cfg.listed_incremental, std::ios::binary);
         if (snap_in) {
             std::string header;
-            std::getline(snap_in, header);  // consume MUTAR_SNAPSHOT_V* header
-            std::string line;
-            while (std::getline(snap_in, line)) {
-                auto tab = line.find('\t');
-                if (tab == std::string::npos) continue;
-                std::string sname = line.substr(0, tab);
-                std::string rest  = line.substr(tab + 1);
-                SnapRec rec{};
-                auto tab2 = rest.find('\t');
-                std::string smts = (tab2 == std::string::npos) ? rest : rest.substr(0, tab2);
-                char* endp = nullptr; errno = 0;
-                rec.mtime = std::strtoll(smts.c_str(), &endp, 10);
-                if (endp == smts.c_str() || (*endp != '\0' && *endp != '\t') || errno != 0) {
-                    print(stderr, "mutar: snapshot: malformed mtime entry '{}'; skipping\n", line);
-                    continue;
+            std::getline(snap_in, header);
+            if (header.rfind("GNU tar-", 0) == 0) {
+                if (!load_gnu_snapshot(snap_in, header, snapshot_map)) {
+                    print(stderr,
+                          "mutar: warning: could not parse GNU snapshot '{}'; "
+                          "treating as level 0\n",
+                          cfg.listed_incremental);
+                    do_incremental = false;
                 }
-                if (tab2 != std::string::npos) {
-                    std::string sdev = rest.substr(tab2 + 1);
-                    char* dend = nullptr; errno = 0;
-                    unsigned long long dv = std::strtoull(sdev.c_str(), &dend, 10);
-                    if (dend != sdev.c_str() && *dend == '\0' && errno == 0) {
-                        rec.dev = static_cast<std::uint64_t>(dv);
-                        rec.has_dev = true;
-                    }
-                }
-                snapshot_map[sname] = rec;
+            } else if (header.rfind("MUTAR_SNAPSHOT", 0) == 0) {
+                load_mutar_snapshot(snap_in, snapshot_map);
+            } else {
+                // Unknown / empty header: try mutar line format from start
+                snap_in.clear();
+                snap_in.seekg(0);
+                load_mutar_snapshot(snap_in, snapshot_map);
             }
         } else {
             // Snapshot file missing → archive all (treat as level 0)
@@ -4480,11 +4821,14 @@ static int op_create(const Config& cfg) {
         writer.set_multivol(max_blocks, rotate_volume);
 
     auto add_file = [&](const std::string& raw_archname, const std::string& fspath) {
-        // Apply --newer filter (skip files not newer than cutoff)
+        // Apply --newer / --newer-mtime filter (all non-dir types GNU covers)
         if (newer_cutoff != (std::time_t)-1) {
             struct stat fst{};
-            if (::lstat(fspath.c_str(), &fst) == 0 && S_ISREG(fst.st_mode)) {
-                if (fst.st_mtime <= newer_cutoff) {
+            if (::lstat(fspath.c_str(), &fst) == 0 && !S_ISDIR(fst.st_mode)) {
+                const std::time_t stamp = cfg.newer_use_ctime
+                    ? static_cast<std::time_t>(fst.st_ctime)
+                    : static_cast<std::time_t>(fst.st_mtime);
+                if (stamp <= newer_cutoff) {
                     mutar_warn(cfg, "newer",
                               std::format("{}: file is not newer than cutoff; not dumped", fspath));
                     return;
@@ -4756,6 +5100,7 @@ static int op_create(const Config& cfg) {
         } else {
             ArchiveStream& vs = *vres;
             ArchiveReader vreader(vs, cfg.blocking_factor, cfg.ignore_zeros, cfg.read_full_records);
+    vreader.set_warn_config(&cfg);
             int verify_count = 0;
             for (;;) {
                 auto [ve, vok, veof] = vreader.next_entry();
@@ -4843,12 +5188,14 @@ static int op_extract(const Config& cfg) {
             if (lr) {
                 have_index = true;
             } else if (!cfg.mutar_index.empty()) {
-                print(stderr, "mutar: warning: cannot load index '{}': {}\n",
-                      idx_path, lr.error().message);
+                mutar_warn(cfg, "index",
+                    std::format("cannot load index '{}': {}",
+                                idx_path, lr.error().message));
             }
         } else if (!cfg.mutar_index.empty()) {
-            print(stderr, "mutar: warning: index '{}' not found; sequential extract\n",
-                  cfg.mutar_index);
+            mutar_warn(cfg, "index",
+                std::format("index '{}' not found; sequential extract",
+                            cfg.mutar_index));
         }
     }
 
@@ -4873,6 +5220,7 @@ static int op_extract(const Config& cfg) {
     }
 
     ArchiveReader reader(s, cfg.blocking_factor, cfg.ignore_zeros, cfg.read_full_records);
+    reader.set_warn_config(&cfg);
     if (cfg.pax_option_rules.any())
         reader.set_pax_rules(&cfg.pax_option_rules);
 
@@ -5367,8 +5715,9 @@ static int op_extract(const Config& cfg) {
                 if (!data_ok || child_rc != 0) {
                     // GNU default: --no-ignore-command-error → non-zero is failure
                     if (cfg.ignore_command_error) {
-                        print(stderr, "mutar: warning: --to-command '{}' exited {}\n",
-                              cfg.to_command, child_rc);
+                        mutar_warn(cfg, "to-command",
+                            std::format("--to-command '{}' exited {}",
+                                        cfg.to_command, child_rc));
                     } else {
                         print(stderr, "mutar: --to-command '{}' exited {}\n",
                               cfg.to_command, child_rc);
@@ -5397,13 +5746,100 @@ static int op_extract(const Config& cfg) {
                 break;
             }
 
-            // Sparse extraction: write each data segment at its correct file offset
+            // Sparse extraction (with multi-volume mid-file support): place
+            // concatenated archive data into sparse map offsets. Continuation
+            // volumes use type 'M' with multivol_offset into the *archived*
+            // sparse stream (not logical file offset).
             if (e.is_sparse && !e.sparse_map.empty()) {
-                // Pre-allocate the full logical file size (creates hole-based sparse file)
                 std::int64_t real_sz = e.real_size > 0 ? e.real_size : e.size;
                 ::ftruncate(fd, static_cast<off_t>(real_sz));
-                reader.extract_sparse_data(e, fd);
-                total_bytes += e.size;
+
+                std::size_t seg_idx = 0;
+                std::int64_t seg_pos = 0;
+                auto place_sparse = [&](const char* data, std::size_t n) {
+                    std::size_t off = 0;
+                    while (off < n && seg_idx < e.sparse_map.size()) {
+                        const auto& sm = e.sparse_map[seg_idx];
+                        std::int64_t room = sm.numbytes - seg_pos;
+                        if (room <= 0) {
+                            ++seg_idx;
+                            seg_pos = 0;
+                            continue;
+                        }
+                        std::size_t chunk = static_cast<std::size_t>(std::min<std::int64_t>(
+                            static_cast<std::int64_t>(n - off), room));
+                        if (::lseek(fd, static_cast<off_t>(sm.offset + seg_pos),
+                                    SEEK_SET) < 0)
+                            return;
+                        const char* p = data + off;
+                        std::size_t left = chunk;
+                        while (left > 0) {
+                            ssize_t w = ::write(fd, p, left);
+                            if (w < 0) {
+                                if (errno == EINTR) continue;
+                                return;
+                            }
+                            p += w;
+                            left -= static_cast<std::size_t>(w);
+                        }
+                        off += chunk;
+                        seg_pos += static_cast<std::int64_t>(chunk);
+                        if (seg_pos >= sm.numbytes) {
+                            ++seg_idx;
+                            seg_pos = 0;
+                        }
+                    }
+                };
+
+                const std::int64_t arch_total = e.asize;
+                std::int64_t arch_done = 0;
+                Entry cur = e;
+                for (;;) {
+                    std::int64_t got = 0;
+                    if (!reader.read_entry_data(cur, /*out_fd=*/-1, place_sparse, &got)) {
+                        print(stderr, "mutar: {}: write error during sparse extract\n",
+                              outpath);
+                        exit_code = EXIT_FAILURE;
+                        break;
+                    }
+                    arch_done += got;
+                    if (arch_done >= arch_total)
+                        break;
+                    if (got >= cur.asize && arch_done < arch_total) {
+                        // Fragment claimed complete but total not reached — need next vol
+                    } else if (got >= cur.asize) {
+                        break;
+                    }
+                    if (!cfg.multi_volume) {
+                        print(stderr,
+                              "mutar: {}: unexpected EOF in sparse archive "
+                              "(got {} of {} archived bytes)\n",
+                              outpath, arch_done, arch_total);
+                        exit_code = EXIT_FAILURE;
+                        break;
+                    }
+                    if (!switch_extract_volume()) {
+                        print(stderr,
+                              "mutar: {}: multi-volume sparse: need next volume "
+                              "(have {} of {} archived bytes)\n",
+                              outpath, arch_done, arch_total);
+                        exit_code = EXIT_FAILURE;
+                        break;
+                    }
+                    auto [e2, ok2, eof2] = reader.next_entry();
+                    if (eof2 || !ok2 || e2.typeflag != GNUTYPE_MULTIVOL) {
+                        print(stderr,
+                              "mutar: {}: multi-volume sparse: missing type 'M' "
+                              "continuation\n",
+                              outpath);
+                        exit_code = EXIT_FAILURE;
+                        break;
+                    }
+                    if (e2.multivol_offset > 0 && e2.multivol_offset != arch_done)
+                        arch_done = e2.multivol_offset;
+                    cur = std::move(e2);
+                }
+                total_bytes += arch_done;
             } else {
                 // Regular / multi-volume: first fragment has size=full; 'M' has
                 // size=remaining and multivol_offset into the file.
@@ -5556,6 +5992,7 @@ static int op_diff(const Config& cfg) {
     }
     ArchiveStream& s = *res;
     ArchiveReader reader(s, cfg.blocking_factor, cfg.ignore_zeros, cfg.read_full_records);
+    reader.set_warn_config(&cfg);
     if (cfg.pax_option_rules.any())
         reader.set_pax_rules(&cfg.pax_option_rules);
 
@@ -5613,6 +6050,7 @@ static int op_append(const Config& cfg) {
     }
     ArchiveStream& s = *res;
     ArchiveReader reader(s, cfg.blocking_factor, cfg.ignore_zeros, cfg.read_full_records);
+    reader.set_warn_config(&cfg);
     if (cfg.pax_option_rules.any())
         reader.set_pax_rules(&cfg.pax_option_rules);
 
@@ -5669,6 +6107,7 @@ static int op_update(const Config& cfg) {
         }
         ArchiveStream& s = *res;
         ArchiveReader reader(s, cfg.blocking_factor, cfg.ignore_zeros, cfg.read_full_records);
+    reader.set_warn_config(&cfg);
         if (cfg.pax_option_rules.any())
             reader.set_pax_rules(&cfg.pax_option_rules);
         for (;;) {
@@ -5729,6 +6168,7 @@ static int op_delete(const Config& cfg) {
         }
         ArchiveStream& src = *res;
         ArchiveReader reader(src, cfg.blocking_factor, false, cfg.read_full_records);
+    reader.set_warn_config(&cfg);
         if (cfg.pax_option_rules.any())
             reader.set_pax_rules(&cfg.pax_option_rules);
 
@@ -5795,6 +6235,7 @@ static int op_test_label(const Config& cfg) {
     }
     ArchiveStream& s = *res;
     ArchiveReader reader(s, cfg.blocking_factor, cfg.ignore_zeros, cfg.read_full_records);
+    reader.set_warn_config(&cfg);
     if (cfg.pax_option_rules.any())
         reader.set_pax_rules(&cfg.pax_option_rules);
 
@@ -5830,6 +6271,7 @@ static int op_cat(const Config& cfg) {
     {
         Config tmp = cfg;
         ArchiveReader dummy(dst, cfg.blocking_factor, false, cfg.read_full_records);
+    dummy.set_warn_config(&cfg);
         for (;;) {
             auto [e, ok, eof] = dummy.next_entry();
             if (eof || !ok) break;
@@ -6348,7 +6790,10 @@ static Config parse_args(int argc, char* argv[]) {
         case 'V': cfg.label             = ::optarg; break;
         case 'H': set_format(cfg, ::optarg); break;
         case 'T': cfg.files_from.push_back(::optarg); break;
-        case 'N': cfg.newer_than        = ::optarg; break;
+        case 'N':
+            cfg.newer_than = ::optarg;
+            cfg.newer_use_ctime = true; // GNU --newer / -N / --after-date → ctime
+            break;
         case 'w': cfg.interactive       = true; break;
         case 'W': cfg.verify            = true; break;
         case 'U': cfg.unlink_first      = true; break;
@@ -6480,7 +6925,10 @@ static Config parse_args(int argc, char* argv[]) {
         }
         case OPT_ONE_FILE_SYSTEM:    cfg.one_file_system = true; break;
         case OPT_TO_COMMAND:         cfg.to_command = ::optarg; break;
-        case OPT_NEWER_MTIME:        cfg.newer_than = ::optarg; break;
+        case OPT_NEWER_MTIME:
+            cfg.newer_than = ::optarg;
+            cfg.newer_use_ctime = false; // --newer-mtime → mtime only
+            break;
         case OPT_ONE_TOP_LEVEL:
             cfg.one_top_level = (::optarg && ::optarg[0]) ? ::optarg : "__auto__";
             break;
@@ -6897,7 +7345,8 @@ static void print_usage(const char* prog) {
         "  -x, --extract, --get            Extract files from an archive\n"
         "\nOperation modifiers:\n"
         "      --check-device              Check device numbers in listed-incremental snapshot (default)\n"
-        "  -g, --listed-incremental=FILE   Handle new GNU-format incremental backup\n"
+        "  -g, --listed-incremental=FILE   Handle listed-incremental backup (MUTAR_SNAPSHOT_V2;\n"
+        "                                  also reads GNU tar snapshot format 2 best-effort)\n"
         "                                  Snapshot records files+dirs (mtime+dev); level>=1 skips\n"
         "                                  unchanged files/symlinks/specials (mtime+dev when\n"
         "                                  --check-device); directories always dumped\n"
@@ -6936,7 +7385,7 @@ static void print_usage(const char* prog) {
         "      --delay-directory-restore   Delay setting mtime/mode of extracted directories until end\n"
         "      --group=NAME                Force NAME as group for added files\n"
         "      --group-map=FILE            Use FILE to map file owner GIDs\n"
-        "      --mode=CHANGES              Force mode CHANGES for added files (octal; symbolic partial)\n"
+        "      --mode=CHANGES              Force mode CHANGES for added files (octal or symbolic u+x,go-w)\n"
         "      --mtime=DATE-OR-FILE        Set mtime for added files from DATE-OR-FILE\n"
         "      --no-delay-directory-restore  Apply directory mtime/mode immediately (default)\n"
         "      --no-same-owner             Extract files as yourself (default for ordinary users)\n"
@@ -7040,8 +7489,8 @@ static void print_usage(const char* prog) {
         "      --no-verbatim-files-from    -T treats file names beginning with dash as options (default)\n"
         "      --no-wildcards              Verbatim string matching\n"
         "      --no-wildcards-match-slash  Wildcard matches '/' is not allowed\n"
-        "  -N, --newer=DATE-OR-FILE, --after-date=DATE-OR-FILE  Only store files newer than DATE-OR-FILE\n"
-        "      --newer-mtime=DATE          Compare date and time when data changed only\n"
+        "  -N, --newer=DATE-OR-FILE, --after-date=DATE-OR-FILE  Only store files with ctime newer than DATE\n"
+        "      --newer-mtime=DATE          Only store files with mtime newer than DATE\n"
         "      --null                      -T reads null-terminated names; implies --verbatim-files-from\n"
         "  -l, --check-links              Print a message if not all hard links are dumped\n"
         "      --one-file-system           Stay in local file system when creating archive\n"

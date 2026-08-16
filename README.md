@@ -216,7 +216,7 @@ Magic-byte auto-detection works on read even without `-a`.
 | `--quoting-style` | ✅ | `literal`/`escape`/`c`/`c-maybe`/`shell`/`shell-always` for `-t` and verbose extract |
 | `--xattrs` / `--acls` | ✅ | Store/restore via PAX `SCHILY.xattr.*` / `SCHILY.acl.*` when built with lib support; SELinux never stored |
 | `--selinux` / `--no-selinux` | ❌ Unsupported | Policy: no-op + warning (no test hardware) |
-| `-G -g --listed-incremental` | ✅ | `-G` dumpdir create/extract purge; `-g` snapshot V2; level≥1 skips unchanged files/symlinks/specials; dirs always dumped |
+| `-G -g --listed-incremental` | ✅ | `-G` dumpdir create/extract purge; `-g` snapshot V2 write; **reads GNU format 2** best-effort; level≥1 skips unchanged files/symlinks/specials; dirs always dumped |
 | `--exclude-ignore{,-recursive}` | ✅ | Per-directory ignore files (children only vs whole subtree) |
 | `--multi-volume -M -L` | ✅ | Between-member + mid-file split (`GNUTYPE_MULTIVOL` 'M'); extract reassembly; GNU tar interop |
 | `--rsh-command --rmt-command` | ✅ Implemented | rmt O/R/W/L/C via rsh; L=lseek enables remote -r/-u (uncompressed) |

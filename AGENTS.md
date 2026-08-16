@@ -131,11 +131,10 @@ See `COMPATIBILITY_PROGRESS.md` for the full option audit. Short list matching c
 - SELinux (`--selinux` / `--no-selinux`) — policy-unsupported no-op + warning
 
 **Partial / limited (do not claim complete GNU parity):**
-- rmt: O/R/W/L/C via rsh (L=lseek); remote -r/-u when seek works; **compressed remote not supported**
-- Listed-incremental uses `MUTAR_SNAPSHOT_V2` text format (not GNU binary snapshot)
+- Listed-incremental **write** uses `MUTAR_SNAPSHOT_V2` text (GNU format 2 **read** is supported best-effort)
 - True compressed frame-level seek without materialize (see `TODO.md`)
 
-**Implemented (do not list as no-ops):** multi-volume mid-file (`GNUTYPE_MULTIVOL` 'M'), `-s`/`--preserve-order`, `--pax-option` (full GNU set), `--restrict`, `--backup` CONTROL (`none`/`simple`/`numbered`/`existing`), `--quoting-style` (+ shell-escape/locale/clocale), `--check-device`/`--no-check-device`, `--xattrs` / `--acls` (SCHILY PAX when built with lib support), `--verify`, `--hole-detection`, `--owner-map` / `--group-map`, `--exclude-vcs-ignores`, `--exclude-ignore` / `--exclude-ignore-recursive`, `-G` dumpdir create/extract, `-g` listed-incremental (skip files/symlinks/specials; dirs always dumped), `--sparse-version` 0.0/0.1/1.0, `--index-file`, `--checkpoint-action`, `--interactive`, `--full-time`, `--warning`, wildcards/anchoring, `--overwrite-dir` / `--no-overwrite-dir`, and related PR #170/#172 / GOAL_GNU_PARITY Phase 1–7 features.
+**Implemented (do not list as no-ops):** multi-volume mid-file (`GNUTYPE_MULTIVOL` 'M') including **sparse**, compressed remote (materialize), `--mode` symbolic, `-N` ctime vs `--newer-mtime`, `-g` GNU snapshot read, rmt O/R/W/L/C + remote -r/-u, `-s`/`--preserve-order`, `--pax-option` (full GNU set), `--restrict`, `--backup` CONTROL, `--quoting-style`, `--check-device`/`--no-check-device`, `--xattrs` / `--acls`, `--verify`, `--hole-detection`, `--owner-map` / `--group-map`, `--exclude-vcs-ignores`, `--exclude-ignore` / `--exclude-ignore-recursive`, `-G` dumpdir, `-g` listed-incremental skip, `--sparse-version` 0.0/0.1/1.0, `--index-file`, `--checkpoint-action`, `--interactive`, `--full-time`, `--warning` (broad `mutar_warn` coverage), wildcards/anchoring, `--overwrite-dir` / `--no-overwrite-dir`, Phase 1–8 features.
 
 ---
 

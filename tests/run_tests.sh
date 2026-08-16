@@ -519,16 +519,18 @@ test_all_roundtrip() {
     return 0
 }
 
-# ── T28: --newer date filter ──────────────────────────────────────────────────
+# ── T28: --newer-mtime date filter (mtime; --newer uses ctime per GNU) ────────
 test_newer_filter() {
     local W; W="$(mkwork T28)"
     mkdir -p "$W/input"
     echo "old content" > "$W/input/old.txt"
     echo "new content" > "$W/input/new.txt"
-    touch -t 200001010000 "$W/input/old.txt"   # year 2000 — old
-    touch -t 203001010000 "$W/input/new.txt"   # year 2030 — future/new
+    touch -t 200001010000 "$W/input/old.txt"   # year 2000 — old mtime
+    touch -t 203001010000 "$W/input/new.txt"   # year 2030 — future/new mtime
 
-    "$MUTAR" -cf "$W/test.tar" -C "$W/input" --newer="2020-01-01" . 2>/dev/null
+    # Use --newer-mtime: touch updates ctime to "now", so --newer (ctime) would
+    # include both files. GNU --newer-mtime compares data-change time only.
+    "$MUTAR" -cf "$W/test.tar" -C "$W/input" --newer-mtime="2020-01-01" . 2>/dev/null
     local listing; listing="$("$MUTAR" -tf "$W/test.tar" 2>/dev/null)"
     echo "$listing" | grep -q "new.txt"  || { echo "new.txt missing"; return 1; }
     echo "$listing" | grep -q "old.txt"  && { echo "old.txt should be excluded"; return 1; }

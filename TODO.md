@@ -19,17 +19,12 @@ That campaign **includes** mid-file multi-volume and full `--pax-option` (no lon
 ## Smaller / demand-driven (optional)
 
 - More `--pax-option` keywords one-at-a-time when a real user needs them  
-- `--mode` full GNU symbolic mode strings (`u+r`, `go-w`, …) — octal works  
-- `-N`/`--newer` ctime semantics vs `--newer-mtime` (today both use mtime)  
-- Multi-volume mid-file split for **sparse** members  
-- Compressed remote rmt archives  
-- GNU binary listed-incremental snapshot interop (mutar uses MUTAR_SNAPSHOT_V2)  
-- Broader `--warning=KEYWORD` coverage (some sites still raw stderr)  
 - Numbered backup edge cases matching GNU exactly  
 - Packaging (ebuild / deb)  
 - Broader CBMC coverage beyond `sanitize_path`  
+- Write GNU listed-incremental snapshot format (read of GNU format 2 is done; write remains MUTAR_SNAPSHOT_V2)
 
-**Done in GOAL_GNU_PARITY Phases 1–7 (do not re-list):** rmt `L` (lseek) + remote `-r`/`-u`, mid-file multi-vol, full `--pax-option`, preserve-order, exclude-ignore, dumpdir `-G`, listed-incremental skip, Phase 1 quick wins.
+**Done in GOAL_GNU_PARITY Phases 1–8 residuals:** rmt `L` + remote `-r`/`-u` + **compressed remote**, mid-file multi-vol (**including sparse**), full `--pax-option`, preserve-order, exclude-ignore, dumpdir `-G`, listed-incremental skip + **GNU snapshot read**, `--mode` symbolic, `-N` ctime vs `--newer-mtime`, broader `--warning`.
 
 ## Policy
 

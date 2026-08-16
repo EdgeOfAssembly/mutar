@@ -776,8 +776,7 @@ Previously both long options were miswired to `OPT_EXCLUDE_FROM` (global pattern
 
 ## GOAL_GNU_PARITY Phase 8 — honesty + residual pure no-ops (2026-08-17)
 
-Phase 8 parity re-audit (`$TMPDIR/grok-$(id -u)/mutar/parity/phase8-parity-report.md`): **NO**
-(full YES blocked by deeper interop / partials). Quick residual fixes applied:
+Phase 8 parity re-audit (`$TMPDIR/grok-$(id -u)/mutar/parity/phase8-parity-report.md`): residual B2 closed below.
 
 | Item | Status | Notes |
 |------|--------|-------|
@@ -789,8 +788,16 @@ Phase 8 parity re-audit (`$TMPDIR/grok-$(id -u)/mutar/parity/phase8-parity-repor
 | `-n` / `--seek` / `--no-seek` | ✅ | `is_seekable(cfg.seek)` gates index seek / materialize |
 | `--sort=inode` | ✅ | Directory walk sorts by `st_ino` then name |
 | `--delay-directory-restore` | ✅ | GNU polarity: default immediate; delay only when flag set |
-| `--mode` symbolic | ⚠️ | Octal only; help says symbolic partial |
-| `-N` ctime / sparse multi-vol / compressed remote / GNU snapshot / full `--warning` | ⏳ | Follow-up (see phase8 report B2) |
+| `--mode` symbolic | ✅ | Octal + GNU symbolic (`u+x,go-w,a=r`, …) via `apply_mode_changes` |
+| `-N` / `--newer` vs `--newer-mtime` | ✅ | `--newer`/`-N` filter by **ctime**; `--newer-mtime` by **mtime** |
+| Sparse mid-file multi-vol | ✅ | `write_sparse_payload` + sparse extract multi-vol loop (type `M`) |
+| Compressed remote | ✅ | Materialize download / temp compress+upload via rmt |
+| `-g` GNU snapshot read | ✅ | Detects `GNU tar-*-2` format 2; maps dumpdir → skip filter; write stays MUTAR_SNAPSHOT_V2 |
+| `--warning` coverage | ✅ | Additional sites: checksum, unknown-keyword, index, to-command, compress |
+
+**Tests:** `tests/test_phase8_residuals.sh` (CTest `mutar_phase8_residuals_tests`).
 
 **SELinux:** still policy no-op only.
+
+**Still not claimed:** writing GNU binary snapshot (mutar writes V2 only); SELinux.
 
