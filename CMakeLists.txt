@@ -235,6 +235,13 @@ add_test(
   WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
 )
 
+# GOAL_GNU_PARITY Phase 1 quick wins (G0.1, G1.2, G1.8–G1.11, G1.13–G1.17)
+add_test(
+  NAME mutar_phase1_parity_tests
+  COMMAND bash ${CMAKE_SOURCE_DIR}/tests/test_phase1_parity.sh $<TARGET_FILE:mutar>
+  WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+)
+
 # Phase F G17: index/seek micro-benchmark smoke (always passes; not a fail gate)
 # Full numbers: BENCH_MEMBERS=2000 bash tests/bench_index_seek.sh build/mutar
 add_test(

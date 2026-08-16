@@ -12,6 +12,7 @@
 #include "mutar.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <cerrno>
 #include <climits>
@@ -70,6 +71,164 @@ namespace mutar {
 
 // Index file for --index-file (verbose output redirection)
 static FILE* g_index_fp = nullptr;
+
+// --totals[=SIGNAL]: running byte counter + optional async-signal-safe dump
+static std::atomic<std::int64_t> g_running_total{0};
+static std::atomic<bool>         g_totals_signal_armed{false};
+
+static void totals_signal_handler(int /*sig*/) {
+    // async-signal-safe path only
+    char buf[96];
+    std::int64_t n = g_running_total.load(std::memory_order_relaxed);
+    // "Total bytes processed: <n>\n"
+    static const char prefix[] = "Total bytes processed: ";
+    std::size_t pos = 0;
+    for (const char* p = prefix; *p; ++p)
+        buf[pos++] = *p;
+    // format unsigned decimal into buf
+    char num[32];
+    std::size_t ni = 0;
+    std::uint64_t v = static_cast<std::uint64_t>(n < 0 ? 0 : n);
+    if (v == 0) {
+        num[ni++] = '0';
+    } else {
+        char tmp[32];
+        std::size_t ti = 0;
+        while (v > 0 && ti < sizeof(tmp)) {
+            tmp[ti++] = static_cast<char>('0' + (v % 10));
+            v /= 10;
+        }
+        while (ti > 0)
+            num[ni++] = tmp[--ti];
+    }
+    for (std::size_t i = 0; i < ni && pos < sizeof(buf) - 2; ++i)
+        buf[pos++] = num[i];
+    buf[pos++] = '\n';
+    (void)::write(STDERR_FILENO, buf, pos);
+}
+
+static void install_totals_signal(int sig) {
+    if (sig <= 0)
+        return;
+    struct sigaction sa{};
+    sa.sa_handler = totals_signal_handler;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = SA_RESTART;
+    if (::sigaction(sig, &sa, nullptr) != 0) {
+        print(stderr, "mutar: cannot install totals signal handler: {}\n",
+              std::strerror(errno));
+        return;
+    }
+    g_totals_signal_armed.store(true, std::memory_order_relaxed);
+}
+
+static void add_running_total(std::int64_t n) {
+    if (n > 0)
+        g_running_total.fetch_add(n, std::memory_order_relaxed);
+}
+
+static void set_running_total(std::int64_t n) {
+    g_running_total.store(n, std::memory_order_relaxed);
+}
+
+/// Decode GNU-style backslash escapes in a name (octal \nnn, \a \b \f \n \r \t \v \\).
+static std::string unquote_name(std::string_view in) {
+    std::string out;
+    out.reserve(in.size());
+    for (std::size_t i = 0; i < in.size(); ++i) {
+        char c = in[i];
+        if (c != '\\' || i + 1 >= in.size()) {
+            out.push_back(c);
+            continue;
+        }
+        char n = in[++i];
+        if (n >= '0' && n <= '7') {
+            int val = n - '0';
+            int digits = 1;
+            while (digits < 3 && i + 1 < in.size() &&
+                   in[i + 1] >= '0' && in[i + 1] <= '7') {
+                val = val * 8 + (in[++i] - '0');
+                ++digits;
+            }
+            out.push_back(static_cast<char>(val));
+        } else {
+            switch (n) {
+            case 'a': out.push_back('\a'); break;
+            case 'b': out.push_back('\b'); break;
+            case 'f': out.push_back('\f'); break;
+            case 'n': out.push_back('\n'); break;
+            case 'r': out.push_back('\r'); break;
+            case 't': out.push_back('\t'); break;
+            case 'v': out.push_back('\v'); break;
+            case '\\': out.push_back('\\'); break;
+            default: out.push_back(n); break;
+            }
+        }
+    }
+    return out;
+}
+
+/// Print MUTAR_SNAPSHOT_V2 field ranges (GNU-style layout).
+static void print_snapshot_field_ranges() {
+    print("This mutar's snapshot file field ranges are\n"
+          "   (field name      => [ min, max ]):\n"
+          "\n"
+          "    name            => [ 1, {} ],\n"
+          "    mtime           => [ 0, {} ],\n"
+          "    dev             => [ 0, {} ],\n"
+          "\n",
+          static_cast<unsigned long>(PATH_MAX > 0 ? PATH_MAX : 4096),
+          static_cast<unsigned long long>(std::numeric_limits<std::int64_t>::max()),
+          static_cast<unsigned long long>(std::numeric_limits<std::uint64_t>::max()));
+}
+
+/// Parse --totals[=SIGNAL] name into a signal number; 0 if end-of-op only.
+static int parse_totals_signal(const char* name) {
+    if (!name || !*name)
+        return 0;
+    std::string_view s(name);
+    // Accept with or without SIG prefix
+    if (s.size() > 3 && (s[0] == 'S' || s[0] == 's') &&
+        (s[1] == 'I' || s[1] == 'i') && (s[2] == 'G' || s[2] == 'g'))
+        s.remove_prefix(3);
+    auto eq = [](std::string_view a, const char* b) {
+        return strcasecmp(std::string(a).c_str(), b) == 0;
+    };
+    if (eq(s, "HUP"))  return SIGHUP;
+    if (eq(s, "QUIT")) return SIGQUIT;
+    if (eq(s, "INT"))  return SIGINT;
+    if (eq(s, "USR1")) return SIGUSR1;
+    if (eq(s, "USR2")) return SIGUSR2;
+    return -1; // invalid
+}
+
+/// Parse --sparse-version=MAJOR[.MINOR]; returns false on error.
+static bool parse_sparse_version(const char* s, unsigned& major, unsigned& minor) {
+    if (!s || !*s)
+        return false;
+    char* end = nullptr;
+    errno = 0;
+    unsigned long maj = std::strtoul(s, &end, 10);
+    if (errno || end == s)
+        return false;
+    unsigned long min = 0;
+    if (*end == '.') {
+        const char* mstart = end + 1;
+        char* mend = nullptr;
+        errno = 0;
+        min = std::strtoul(mstart, &mend, 10);
+        if (errno || mend == mstart || *mend != '\0')
+            return false;
+    } else if (*end != '\0') {
+        return false;
+    }
+    // GNU tar accepts 0.0, 0.1, 1.0
+    if (!((maj == 0 && (min == 0 || min == 1)) || (maj == 1 && min == 0)))
+        return false;
+    major = static_cast<unsigned>(maj);
+    minor = static_cast<unsigned>(min);
+    return true;
+}
 
 // ── Compression helpers ───────────────────────────────────────────────────────
 
@@ -1999,6 +2158,37 @@ private:
         }
     }
 
+    /// Open file for archiving; with --atime-preserve=system try O_NOATIME.
+    static int open_for_dump(const std::string& fspath, const Config& cfg) {
+        int flags = O_RDONLY;
+#ifdef O_NOATIME
+        if (cfg.atime_preserve && cfg.atime_preserve_method == "system")
+            flags |= O_NOATIME;
+#endif
+        int fd = ::open(fspath.c_str(), flags);
+#ifdef O_NOATIME
+        // O_NOATIME requires ownership; fall back if EPERM
+        if (fd < 0 && (flags & O_NOATIME) && errno == EPERM)
+            fd = ::open(fspath.c_str(), O_RDONLY);
+#endif
+        return fd;
+    }
+
+    static void restore_atime_if_needed(const std::string& fspath,
+                                        const Config& cfg,
+                                        const struct stat& st) {
+        // METHOD=replace (default): restore atime after read.
+        // METHOD=system: rely on O_NOATIME; no restore.
+        if (!cfg.atime_preserve)
+            return;
+        if (cfg.atime_preserve_method == "system")
+            return;
+        struct timespec ts[2];
+        ts[0] = {.tv_sec = st.st_atim.tv_sec, .tv_nsec = st.st_atim.tv_nsec};
+        ts[1] = {.tv_sec = st.st_mtim.tv_sec, .tv_nsec = st.st_mtim.tv_nsec};
+        ::utimensat(AT_FDCWD, fspath.c_str(), ts, AT_SYMLINK_NOFOLLOW);
+    }
+
     bool write_regular(Entry& e, const std::string& fspath,
                        const Config& cfg, const struct stat& st) {
         record_index_entry(e);
@@ -2006,7 +2196,7 @@ private:
         Block hblk = encode_header(e, cfg);
         buf_.write_block(*stream_, hblk);
 
-        int fd = ::open(fspath.c_str(), O_RDONLY);
+        int fd = open_for_dump(fspath, cfg);
         if (fd < 0) {
             print(stderr, "mutar: {}: {}\n", fspath, std::strerror(errno));
             write_data_zeros(e.size);
@@ -2034,13 +2224,7 @@ private:
             }
         }
         ::close(fd);
-        // --atime-preserve: restore original access time after reading the file
-        if (cfg.atime_preserve) {
-            struct timespec ts[2];
-            ts[0] = {.tv_sec = st.st_atim.tv_sec, .tv_nsec = st.st_atim.tv_nsec};
-            ts[1] = {.tv_sec = st.st_mtim.tv_sec, .tv_nsec = st.st_mtim.tv_nsec};
-            ::utimensat(AT_FDCWD, fspath.c_str(), ts, AT_SYMLINK_NOFOLLOW);
-        }
+        restore_atime_if_needed(fspath, cfg, st);
         // Pad any remaining blocks (file shorter than stated size)
         write_data_zeros(remaining);
         return true;
@@ -2049,7 +2233,7 @@ private:
     // Write a GNU sparse ('S' type) entry using SEEK_DATA/SEEK_HOLE hole detection.
     bool write_sparse(Entry& e, const std::string& fspath,
                       const Config& cfg, const struct stat& st) {
-        int fd = ::open(fspath.c_str(), O_RDONLY);
+        int fd = open_for_dump(fspath, cfg);
         if (fd < 0) { print(stderr, "mutar: {}: {}\n", fspath, std::strerror(errno)); return false; }
 
         auto segs = detect_sparse_segments(fd, e.size, cfg.hole_detection);
@@ -2081,8 +2265,8 @@ private:
             record_index_entry(idx_e);
         }
 
-        // GNU sparse format using PAX extended header (GNU extensions within PAX 'x' header)
-        if (fmt_ == Format::PAX) {
+        // Sparse 1.x: PAX extended header (GNU.sparse.*). Sparse 0.x: old GNU 'S' type.
+        if (cfg.sparse_major >= 1) {
             e.typeflag = REGTYPE;
 
             // Build "offset,length[,offset,length...]" sparse map string
@@ -2095,9 +2279,12 @@ private:
             }
 
             // Build PAX extended header data (honours --pax-option delete=KEYWORD)
+            // Sparse version from --sparse-version (default 1.0)
             std::string pax_data;
-            pax_append_if(pax_data, cfg, "GNU.sparse.major",    "1");
-            pax_append_if(pax_data, cfg, "GNU.sparse.minor",    "0");
+            pax_append_if(pax_data, cfg, "GNU.sparse.major",
+                          std::to_string(cfg.sparse_major));
+            pax_append_if(pax_data, cfg, "GNU.sparse.minor",
+                          std::to_string(cfg.sparse_minor));
             pax_append_if(pax_data, cfg, "GNU.sparse.name",     e.name);
             pax_append_if(pax_data, cfg, "GNU.sparse.realsize",
                           std::to_string(logical_size));
@@ -2180,16 +2367,11 @@ private:
             }
 
             ::close(fd);
-            if (cfg.atime_preserve) {
-                struct timespec ts[2];
-                ts[0] = {.tv_sec = st.st_atim.tv_sec, .tv_nsec = st.st_atim.tv_nsec};
-                ts[1] = {.tv_sec = st.st_mtim.tv_sec, .tv_nsec = st.st_mtim.tv_nsec};
-                ::utimensat(AT_FDCWD, fspath.c_str(), ts, AT_SYMLINK_NOFOLLOW);
-            }
+            restore_atime_if_needed(fspath, cfg, st);
             return ok;
         }
 
-        // GNU sparse ('S' type) format for non-PAX modes
+        // GNU sparse ('S' type) format for sparse-version 0.x
         e.typeflag   = GNUTYPE_SPARSE;
 
         // Write GNU LongName extension if needed (before the sparse header)
@@ -2283,14 +2465,7 @@ private:
             buf_.write_block(*stream_, b);
         }
         ::close(fd);
-
-        // --atime-preserve: restore original access time
-        if (cfg.atime_preserve) {
-            struct timespec ts[2];
-            ts[0] = {.tv_sec = st.st_atim.tv_sec, .tv_nsec = st.st_atim.tv_nsec};
-            ts[1] = {.tv_sec = st.st_mtim.tv_sec, .tv_nsec = st.st_mtim.tv_nsec};
-            ::utimensat(AT_FDCWD, fspath.c_str(), ts, AT_SYMLINK_NOFOLLOW);
-        }
+        restore_atime_if_needed(fspath, cfg, st);
         return ok;
     }
 
@@ -2892,38 +3067,81 @@ static void walk_dir(const std::string& base_dir, const std::string& relpath,
     }
 }
 
-// ── Name quoting (--quoting-style) ────────────────────────────────────────────
-// Styles: literal (raw), escape (backslash), c / c-maybe, shell / shell-always.
+// ── Name quoting (--quoting-style / --quote-chars / --no-quote-chars) ─────────
+// Styles: literal, escape, c, c-maybe, shell, shell-always,
+//         shell-escape, shell-escape-always, locale, clocale.
 // Unknown styles fall back to literal. Default (empty) keeps historical raw output.
 
-static bool name_needs_shell_quote(const std::string& name) {
+static bool char_in_set(unsigned char c, const std::string& set) {
+    return set.find(static_cast<char>(c)) != std::string::npos;
+}
+
+static bool name_needs_shell_quote(const std::string& name,
+                                   const std::string& extra_quote = {},
+                                   const std::string& never_quote = {}) {
+    if (name.empty())
+        return true;
     for (unsigned char c : name) {
+        if (char_in_set(c, never_quote))
+            continue;
+        if (char_in_set(c, extra_quote))
+            return true;
         if (std::isalnum(c) || c == '.' || c == '/' || c == '_' || c == '-' ||
             c == '+' || c == ',' || c == ':' || c == '@' || c == '%')
             continue;
         return true;
     }
-    return name.empty();
+    return false;
 }
 
-static bool name_needs_c_quote(const std::string& name) {
+static bool name_needs_c_quote(const std::string& name,
+                               const std::string& extra_quote = {},
+                               const std::string& never_quote = {}) {
     for (unsigned char c : name) {
+        if (char_in_set(c, never_quote))
+            continue;
+        if (char_in_set(c, extra_quote))
+            return true;
         if (c <= 0x1f || c == '"' || c == '\\' || c == ' ' || c == '\'' || c >= 0x7f)
             return true;
     }
     return false;
 }
 
-static std::string quote_name(const std::string& name, const std::string& style) {
-    if (style.empty() || style == "literal")
-        return name;
+static std::string quote_name(const std::string& name, const std::string& style,
+                              const std::string& extra_quote = {},
+                              const std::string& never_quote = {}) {
+    std::string effective = style.empty() ? "literal" : style;
+    // locale / clocale: approximate with shell-escape (C-locale octal escapes)
+    if (effective == "locale" || effective == "clocale")
+        effective = "shell-escape";
 
-    if (style == "escape") {
+    auto force_quote = [&](unsigned char c) {
+        return char_in_set(c, extra_quote) && !char_in_set(c, never_quote);
+    };
+
+    if (effective == "literal") {
+        if (extra_quote.empty())
+            return name;
+        // Honour --quote-chars even with literal style (escape those chars)
+        std::string out;
+        out.reserve(name.size() + 4);
+        for (unsigned char c : name) {
+            if (force_quote(c) || (c == '\\' && !char_in_set(c, never_quote)))
+                out.push_back('\\');
+            out.push_back(static_cast<char>(c));
+        }
+        return out;
+    }
+
+    if (effective == "escape") {
         std::string out;
         out.reserve(name.size() + 8);
         for (unsigned char c : name) {
-            if (c == ' ' || c == '\\' || c == '\t' || c == '\n' || c == '"' ||
-                c == '\'' || c == '$' || c == '`' || c <= 0x1f || c >= 0x7f)
+            bool esc = force_quote(c) ||
+                       c == ' ' || c == '\\' || c == '\t' || c == '\n' || c == '"' ||
+                       c == '\'' || c == '$' || c == '`' || c <= 0x1f || c >= 0x7f;
+            if (esc && !char_in_set(c, never_quote))
                 out.push_back('\\');
             if (c == '\n') { out.push_back('n'); continue; }
             if (c == '\t') { out.push_back('t'); continue; }
@@ -2932,8 +3150,8 @@ static std::string quote_name(const std::string& name, const std::string& style)
         return out;
     }
 
-    if (style == "c" || style == "c-maybe") {
-        if (style == "c-maybe" && !name_needs_c_quote(name))
+    if (effective == "c" || effective == "c-maybe") {
+        if (effective == "c-maybe" && !name_needs_c_quote(name, extra_quote, never_quote))
             return name;
         std::string out;
         out.reserve(name.size() + 8);
@@ -2946,7 +3164,7 @@ static std::string quote_name(const std::string& name, const std::string& style)
                 out += "\\n";
             } else if (c == '\t') {
                 out += "\\t";
-            } else if (c < 0x20 || c >= 0x7f) {
+            } else if (force_quote(c) || c < 0x20 || c >= 0x7f) {
                 out += std::format("\\{:03o}", static_cast<unsigned>(c));
             } else {
                 out.push_back(static_cast<char>(c));
@@ -2956,8 +3174,8 @@ static std::string quote_name(const std::string& name, const std::string& style)
         return out;
     }
 
-    if (style == "shell" || style == "shell-always") {
-        if (style == "shell" && !name_needs_shell_quote(name))
+    if (effective == "shell" || effective == "shell-always") {
+        if (effective == "shell" && !name_needs_shell_quote(name, extra_quote, never_quote))
             return name;
         std::string out;
         out.reserve(name.size() + 8);
@@ -2972,8 +3190,47 @@ static std::string quote_name(const std::string& name, const std::string& style)
         return out;
     }
 
-    // locale / clocale / unknown → literal
+    // shell-escape / shell-escape-always: $'...' ANSI-C quoting
+    if (effective == "shell-escape" || effective == "shell-escape-always") {
+        bool needs = (effective == "shell-escape-always") ||
+                     name_needs_shell_quote(name, extra_quote, never_quote);
+        if (!needs) {
+            for (unsigned char c : name) {
+                if (c < 0x20 || c >= 0x7f) { needs = true; break; }
+            }
+        }
+        if (!needs)
+            return name;
+        std::string out;
+        out.reserve(name.size() + 8);
+        out += "$'";
+        for (unsigned char c : name) {
+            if (c == '\'') {
+                out += "\\'";
+            } else if (c == '\\') {
+                out += "\\\\";
+            } else if (c == '\n') {
+                out += "\\n";
+            } else if (c == '\t') {
+                out += "\\t";
+            } else if (c == '\r') {
+                out += "\\r";
+            } else if (force_quote(c) || c < 0x20 || c >= 0x7f) {
+                out += std::format("\\{:03o}", static_cast<unsigned>(c));
+            } else {
+                out.push_back(static_cast<char>(c));
+            }
+        }
+        out.push_back('\'');
+        return out;
+    }
+
+    // unknown style → literal
     return name;
+}
+
+static std::string quote_name_cfg(const std::string& name, const Config& cfg) {
+    return quote_name(name, cfg.quoting_style, cfg.quote_chars, cfg.no_quote_chars);
 }
 
 // ── Backup path (--backup[=CONTROL] / --suffix) ───────────────────────────────
@@ -3138,9 +3395,9 @@ static void print_verbose(const Entry& e, const Config& cfg,
     std::string line;
     if (cfg.block_number && block_no_val >= 0)
         line += std::format("{}: ", block_no_val);
-    const std::string qname = quote_name(e.name, cfg.quoting_style);
+    const std::string qname = quote_name_cfg(e.name, cfg);
     const std::string qlink = (e.typeflag == SYMTYPE)
-                                  ? quote_name(e.linkname, cfg.quoting_style)
+                                  ? quote_name_cfg(e.linkname, cfg)
                                   : std::string{};
     line += std::format("{} {:<17} {:>8} {} {}{}\n",
                format_mode(e.typeflag, e.mode),
@@ -3186,7 +3443,7 @@ static int op_list(const Config& cfg) {
                             continue;
                         if (cfg.block_number)
                             print("{}: ", ie.offset / BLOCKSIZE);
-                        print("{}\n", quote_name(display_name, cfg.quoting_style));
+                        print("{}\n", quote_name_cfg(display_name, cfg));
                         total_bytes += ie.size;
                     }
                     if (cfg.totals)
@@ -3259,10 +3516,11 @@ static int op_list(const Config& cfg) {
         else {
             if (cfg.block_number)
                 print("{}: ", reader.block_no() - 1);
-            print("{}\n", quote_name(display_name, cfg.quoting_style));
+            print("{}\n", quote_name_cfg(display_name, cfg));
         }
 
         total_bytes += (e.asize + BLOCKSIZE - 1) / BLOCKSIZE * BLOCKSIZE;
+        add_running_total((e.asize + BLOCKSIZE - 1) / BLOCKSIZE * BLOCKSIZE);
         reader.skip_entry(e);
     }
     if (cfg.totals)
@@ -3311,7 +3569,8 @@ static int op_create(const Config& cfg) {
     Format fmt = cfg.fmt;
     if (fmt == Format::Default) fmt = Format::GNU;
     if (cfg.posix) fmt = Format::PAX;
-    if (cfg.old_archive) fmt = Format::V7;
+    // -o on create: same as --old-archive (V7), matching GNU tar
+    if (cfg.old_archive || cfg.compat_o) fmt = Format::V7;
 
     ArchiveWriter writer(s, cfg.blocking_factor, fmt);
 
@@ -3588,6 +3847,7 @@ static int op_create(const Config& cfg) {
 
     writer.finish();
     total_bytes += writer.block_no() * static_cast<std::int64_t>(BLOCKSIZE);
+    set_running_total(total_bytes);
     s.close();
 
     if (cfg.multi_volume && !cfg.volno_file.empty()) {
@@ -3717,6 +3977,7 @@ static int op_create(const Config& cfg) {
     }
 
     // --totals: print total bytes written to stderr
+    set_running_total(total_bytes);
     if (cfg.totals)
         print(stderr, "Total bytes written: {}\n", total_bytes);
 
@@ -4181,11 +4442,18 @@ static int op_extract(const Config& cfg) {
                 int status = 0;
                 ::waitpid(pid, &status, 0);
                 total_bytes += e.size;
-                if (!data_ok || (WIFEXITED(status) && WEXITSTATUS(status) != 0)) {
-                    if (!cfg.ignore_failed_read)
+                add_running_total(e.size);
+                int child_rc = WIFEXITED(status) ? WEXITSTATUS(status) : 1;
+                if (!data_ok || child_rc != 0) {
+                    // GNU default: --no-ignore-command-error → non-zero is failure
+                    if (cfg.ignore_command_error) {
+                        print(stderr, "mutar: warning: --to-command '{}' exited {}\n",
+                              cfg.to_command, child_rc);
+                    } else {
                         print(stderr, "mutar: --to-command '{}' exited {}\n",
-                              cfg.to_command, WEXITSTATUS(status));
-                    // Non-fatal by default (mirrors GNU tar behaviour)
+                              cfg.to_command, child_rc);
+                        exit_code = EXIT_FAILURE;
+                    }
                 }
                 break;
             }
@@ -4217,6 +4485,7 @@ static int op_extract(const Config& cfg) {
                 reader.read_entry_data(e, fd);
             }
             total_bytes += e.size;
+            set_running_total(total_bytes);
             ::close(fd);
 
             // Permissions
@@ -4275,6 +4544,7 @@ static int op_extract(const Config& cfg) {
 
     if (cfg.totals)
         print(stderr, "Total bytes extracted: {}\n", total_bytes);
+    // running total already updated per member when signal armed
 
     if (g_index_fp) { std::fclose(g_index_fp); g_index_fp = nullptr; }
 
@@ -4727,6 +4997,8 @@ enum LongOptVal : int {
     OPT_EXCLUDE_IGNORE_RECURSIVE,
     OPT_QUOTE_CHARS,
     OPT_NO_QUOTE_CHARS,
+    OPT_SHOW_SNAPSHOT_FIELD_RANGES,
+    OPT_PRESERVE,
     OPT_HELP,
     OPT_VERSION,
 };
@@ -4794,6 +5066,7 @@ static const struct option long_opts[] = {
     {"no-same-permissions", no_argument,    nullptr, OPT_NO_SAME_PERMISSIONS},
     {"preserve-order",   no_argument,       nullptr, 's'},
     {"same-order",       no_argument,       nullptr, 's'},
+    {"preserve",         no_argument,       nullptr, OPT_PRESERVE},
     {"delay-directory-restore", no_argument,nullptr, OPT_DELAY_DIR_RESTORE},
     {"no-delay-directory-restore",no_argument,nullptr,OPT_NO_DELAY_DIR_RESTORE},
     {"sort",             required_argument, nullptr, OPT_SORT},
@@ -4878,6 +5151,7 @@ static const struct option long_opts[] = {
     {"show-omitted-dirs",no_argument,       nullptr, OPT_SHOW_OMITTED_DIRS},
     {"show-transformed-names",no_argument,  nullptr, OPT_SHOW_TRANSFORMED},
     {"show-stored-names",no_argument,       nullptr, OPT_SHOW_TRANSFORMED},
+    {"show-snapshot-field-ranges", no_argument, nullptr, OPT_SHOW_SNAPSHOT_FIELD_RANGES},
     {"restrict",         no_argument,       nullptr, OPT_RESTRICT},
     {"warning",          required_argument, nullptr, OPT_WARNING},
     {"interactive",      no_argument,       nullptr, 'w'},
@@ -4919,8 +5193,8 @@ static const struct option long_opts[] = {
     {"bzip",             no_argument,       nullptr, 'j'},
     {"exclude-ignore",   required_argument, nullptr, OPT_EXCLUDE_FROM},
     {"exclude-ignore-recursive",required_argument,nullptr,OPT_EXCLUDE_FROM},
-    {"quote-chars",      required_argument, nullptr, OPT_QUOTING_STYLE},
-    {"no-quote-chars",   required_argument, nullptr, OPT_QUOTING_STYLE},
+    {"quote-chars",      required_argument, nullptr, OPT_QUOTE_CHARS},
+    {"no-quote-chars",   required_argument, nullptr, OPT_NO_QUOTE_CHARS},
     {"strip",            required_argument, nullptr, OPT_STRIP_COMPONENTS},
     {nullptr, 0, nullptr, 0}
 };
@@ -5061,7 +5335,10 @@ static Config parse_args(int argc, char* argv[]) {
         case 'w': cfg.interactive       = true; break;
         case 'W': cfg.verify            = true; break;
         case 'U': cfg.unlink_first      = true; break;
-        case '0': cfg.null_terminated   = true; break;
+        case '0':
+            cfg.null_terminated = true;
+            cfg.verbatim_files_from = true; // GNU: --null implies verbatim
+            break;
 
         case OPT_OLD_ARCHIVE:        cfg.fmt = Format::V7; break;
         case OPT_POSIX:              cfg.fmt = Format::PAX; cfg.posix = true; break;
@@ -5111,11 +5388,28 @@ static Config parse_args(int argc, char* argv[]) {
         }
         case OPT_EXCLUDE:            cfg.exclude_patterns.emplace_back(::optarg); break;
         case OPT_DELAY_DIR_RESTORE:  cfg.delay_dir_restore = true; break;
-        case OPT_TOTALS:             cfg.totals = true; break;
+        case OPT_TOTALS: {
+            cfg.totals = true;
+            if (::optarg && ::optarg[0]) {
+                int sig = parse_totals_signal(::optarg);
+                if (sig < 0) {
+                    print(stderr,
+                          "mutar: invalid signal name '{}' for --totals\n"
+                          "Valid signals: HUP QUIT INT USR1 USR2 (optional SIG prefix)\n",
+                          ::optarg);
+                    std::exit(EXIT_FAILURE);
+                }
+                cfg.totals_signal = sig;
+            }
+            break;
+        }
         case OPT_UTC:                cfg.utc = true; break;
         case OPT_FULL_TIME:          cfg.full_time = true; break;
         case OPT_SHOW_OMITTED_DIRS:  cfg.show_omitted_dirs = true; break;
         case OPT_SHOW_TRANSFORMED:   cfg.show_transformed = true; break;
+        case OPT_SHOW_SNAPSHOT_FIELD_RANGES:
+            cfg.show_snapshot_field_ranges = true;
+            break;
         case OPT_RESTRICT:           cfg.restrict_opt = true; break;
 #ifdef MUTAR_HAVE_XATTR
         case OPT_XATTRS:             cfg.xattrs = true; break;
@@ -5135,8 +5429,38 @@ static Config parse_args(int argc, char* argv[]) {
         case OPT_NO_ACLS:            cfg.acls = false; break;
 #endif
         case OPT_CHECK_LINKS:        cfg.check_links = true; break;
-        case OPT_ATIME_PRESERVE:     cfg.atime_preserve = true; break;
-        case OPT_SPARSE_VERSION:     cfg.sparse_version = ::optarg; break;
+        case OPT_ATIME_PRESERVE: {
+            cfg.atime_preserve = true;
+            if (::optarg && ::optarg[0]) {
+                std::string_view m(::optarg);
+                if (m == "replace" || m == "system") {
+                    cfg.atime_preserve_method = std::string(m);
+                } else {
+                    print(stderr,
+                          "mutar: invalid --atime-preserve method '{}': "
+                          "must be 'replace' or 'system'\n", ::optarg);
+                    std::exit(EXIT_FAILURE);
+                }
+            } else {
+                cfg.atime_preserve_method = "replace";
+            }
+            break;
+        }
+        case OPT_SPARSE_VERSION: {
+            unsigned maj = 0, min = 0;
+            if (!parse_sparse_version(::optarg, maj, min)) {
+                print(stderr,
+                      "mutar: invalid sparse version '{}': "
+                      "supported versions are 0.0, 0.1, 1.0\n",
+                      ::optarg ? ::optarg : "");
+                std::exit(EXIT_FAILURE);
+            }
+            cfg.sparse_version = ::optarg;
+            cfg.sparse_major = maj;
+            cfg.sparse_minor = min;
+            cfg.sparse = true; // implies --sparse
+            break;
+        }
         case OPT_ONE_FILE_SYSTEM:    cfg.one_file_system = true; break;
         case OPT_TO_COMMAND:         cfg.to_command = ::optarg; break;
         case OPT_NEWER_MTIME:        cfg.newer_than = ::optarg; break;
@@ -5234,9 +5558,28 @@ static Config parse_args(int argc, char* argv[]) {
             cfg.check_device = false;
             break;
 
-        // Accepted but no-op for now (complex features not yet implemented)
         case OPT_IGNORE_CMD_ERR:
+            cfg.ignore_command_error = true;
+            break;
         case OPT_NO_IGNORE_CMD_ERR:
+            cfg.ignore_command_error = false;
+            break;
+        case OPT_PRESERVE:
+            // GNU: --preserve = -p + -s
+            cfg.same_permissions = true;
+            cfg.preserve_order = true;
+            // preserve-order full extract behaviour is Phase 7; flag is stored
+            break;
+        case OPT_QUOTE_CHARS:
+            if (::optarg)
+                cfg.quote_chars += ::optarg;
+            break;
+        case OPT_NO_QUOTE_CHARS:
+            if (::optarg)
+                cfg.no_quote_chars += ::optarg;
+            break;
+
+        // Accepted but no-op for now (complex features not yet implemented)
         case OPT_INFO_SCRIPT: // longopt maps to 'F'
         case OPT_NO_SAME_ATTR:
         case OPT_REWIND:
@@ -5268,8 +5611,13 @@ static Config parse_args(int argc, char* argv[]) {
         case OPT_CLAMP_MTIME:         cfg.clamp_mtime = true; break;
         case OPT_NO_DELAY_DIR_RESTORE: cfg.no_delay_dir_restore = true; break;
 
-        case OPT_NULL:               cfg.null_terminated = true; break;
-        case OPT_NO_NULL:            cfg.null_terminated = false; break;
+        case OPT_NULL:
+            cfg.null_terminated = true;
+            cfg.verbatim_files_from = true; // GNU: --null implies verbatim
+            break;
+        case OPT_NO_NULL:
+            cfg.null_terminated = false;
+            break;
 
         case OPT_INDEX_FILE:         cfg.index_file = ::optarg; break;
         case OPT_WRITE_INDEX:        cfg.write_index = true; break;
@@ -5377,9 +5725,32 @@ static Config parse_args(int argc, char* argv[]) {
         case OPT_NO_WILDCARDS_MATCH_SLASH: cfg.wildcards_match_slash = false; break;
         case OPT_UNQUOTE:                cfg.unquote = true; break;
         case OPT_NO_UNQUOTE:             cfg.unquote = false; break;
-        case OPT_QUOTING_STYLE:          cfg.quoting_style = ::optarg; break;
+        case OPT_QUOTING_STYLE: {
+            std::string_view st(::optarg ? ::optarg : "");
+            static const char* valid[] = {
+                "literal", "shell", "shell-always", "shell-escape",
+                "shell-escape-always", "c", "c-maybe", "escape",
+                "locale", "clocale", nullptr
+            };
+            bool ok = false;
+            for (const char** p = valid; *p; ++p) {
+                if (st == *p) { ok = true; break; }
+            }
+            if (!ok) {
+                print(stderr,
+                      "mutar: invalid quoting style '{}'\n"
+                      "Valid styles: literal shell shell-always shell-escape "
+                      "shell-escape-always c c-maybe escape locale clocale\n",
+                      ::optarg ? ::optarg : "");
+                std::exit(EXIT_FAILURE);
+            }
+            cfg.quoting_style = ::optarg;
+            break;
+        }
         case 'o':
+            // GNU: create → --old-archive (V7); extract → --no-same-owner
             cfg.compat_o = true;
+            cfg.fmt = Format::V7; // encode_header reads cfg.fmt on create
             break;
 
         case '?':
@@ -5389,15 +5760,22 @@ static Config parse_args(int argc, char* argv[]) {
         }
     }
 
-    // Remaining args are files
-    for (int i = ::optind; i < argc; ++i)
-        cfg.files.emplace_back(argv[i]);
+    // Remaining args are files (apply --unquote to positional names)
+    for (int i = ::optind; i < argc; ++i) {
+        std::string name = argv[i];
+        if (cfg.unquote)
+            name = unquote_name(name);
+        cfg.files.emplace_back(std::move(name));
+    }
 
     // Read files from -T / --files-from
+    // GNU: --null implies verbatim; --verbatim-files-from disables option/unquote
+    // handling of lines; default (--no-verbatim) treats leading '-' as options.
     for (const auto& fname : cfg.files_from) {
         std::ifstream ifs(fname);
         if (!ifs) { print(stderr, "mutar: {}: cannot open\n", fname); continue; }
         if (cfg.null_terminated) {
+            // --null: NUL-separated, always verbatim (no option parse / no unquote)
             std::string content((std::istreambuf_iterator<char>(ifs)),
                                  std::istreambuf_iterator<char>());
             std::size_t start = 0;
@@ -5411,8 +5789,68 @@ static Config parse_args(int argc, char* argv[]) {
             }
         } else {
             std::string line;
+            int lineno = 0;
             while (std::getline(ifs, line)) {
-                if (!line.empty()) cfg.files.push_back(line);
+                ++lineno;
+                if (line.empty())
+                    continue;
+                if (cfg.verbatim_files_from) {
+                    // Verbatim: filename as-is (no option parse, no unquote)
+                    cfg.files.push_back(line);
+                    continue;
+                }
+                // Non-verbatim: strip whitespace; leading '-' is an option
+                auto l = line.find_first_not_of(" \t\r");
+                if (l == std::string::npos)
+                    continue;
+                auto r = line.find_last_not_of(" \t\r");
+                line = line.substr(l, r - l + 1);
+                if (line.empty())
+                    continue;
+                if (line[0] == '-') {
+                    if (line == "--null") {
+                        cfg.null_terminated = true;
+                        cfg.verbatim_files_from = true;
+                        continue;
+                    }
+                    if (line == "--no-null") {
+                        cfg.null_terminated = false;
+                        continue;
+                    }
+                    if (line == "--verbatim-files-from") {
+                        cfg.verbatim_files_from = true;
+                        continue;
+                    }
+                    if (line == "--no-verbatim-files-from") {
+                        cfg.verbatim_files_from = false;
+                        continue;
+                    }
+                    if (line == "--unquote") {
+                        cfg.unquote = true;
+                        continue;
+                    }
+                    if (line == "--no-unquote") {
+                        cfg.unquote = false;
+                        continue;
+                    }
+                    if (line.starts_with("--exclude=")) {
+                        cfg.exclude_patterns.emplace_back(line.substr(10));
+                        continue;
+                    }
+                    if (line.starts_with("--add-file=")) {
+                        std::string n = line.substr(11);
+                        if (cfg.unquote) n = unquote_name(n);
+                        if (!n.empty()) cfg.files.push_back(std::move(n));
+                        continue;
+                    }
+                    print(stderr, "mutar: {}:{}: unrecognized option\n",
+                          fname, lineno);
+                    std::exit(EXIT_FAILURE);
+                }
+                if (cfg.unquote)
+                    line = unquote_name(line);
+                if (!line.empty())
+                    cfg.files.push_back(line);
             }
         }
     }
@@ -5464,7 +5902,7 @@ static void print_usage(const char* prog) {
         "      --no-check-device           Ignore device field in listed-incremental snapshot\n"
         "      --no-seek                   Archive is not seekable\n"
         "      --occurrence[=NUMBER]       Process only the NUMBERth occurrence of each file in the archive\n"
-        "      --sparse-version=MAJOR[.MINOR]  Set version of the sparse format to use\n"
+        "      --sparse-version=MAJOR[.MINOR]  Set sparse format version (0.0, 0.1, 1.0); implies -S\n"
         "  -S, --sparse                    Handle sparse files efficiently\n"
         "\nOverwrite control:\n"
         "  -k, --keep-old-files            Don't replace existing files when extracting\n"
@@ -5486,6 +5924,7 @@ static void print_usage(const char* prog) {
         "      --to-command=COMMAND        Pipe extracted files to another program\n"
         "\nHandling of file attributes:\n"
         "      --atime-preserve[=METHOD]   Preserve access times on dumped files\n"
+        "                                  METHOD=replace (default) or system (O_NOATIME)\n"
         "      --clamp-mtime               Only set time when the file is more recent than what was given with --mtime\n"
         "      --delay-directory-restore   Delay setting modification times and permissions of extracted directories\n"
         "      --group=NAME                Force NAME as group for added files\n"
@@ -5500,7 +5939,7 @@ static void print_usage(const char* prog) {
         "      --owner-map=FILE            Use FILE to map file owner UIDs\n"
         "  -p, --preserve-permissions, --same-permissions  Extract information about file permissions\n"
         "      --preserve                  Same as both -p and -s\n"
-        "  -s, --preserve-order, --same-order  Member arguments are listed in the same order as the files in the archive\n"
+        "  -s, --preserve-order, --same-order  Member arguments listed in archive order (flag stored; full extract Phase 7)\n"
         "      --same-owner                Try extracting files with the same ownership as exists in the archive\n"
         "      --sort=ORDER                Directory sorting order: none (default), name or inode\n",
         prog);
@@ -5582,6 +6021,7 @@ static void print_usage(const char* prog) {
         "      --no-anchored               Patterns match after any '/' (match basename)\n"
         "      --no-null                   Disable the effect of the previous --null option\n"
         "      --no-recursion              Avoid descending automatically in directories\n"
+        "      --no-unquote                Do not unquote input file or member names\n"
         "      --no-verbatim-files-from    -T treats file names beginning with dash as options (default)\n"
         "      --no-wildcards              Verbatim string matching\n"
         "      --no-wildcards-match-slash  Wildcard matches '/' is not allowed\n"
@@ -5593,7 +6033,8 @@ static void print_usage(const char* prog) {
         "      --recursion                 Recurse into directories (default)\n"
         "      --suffix=STRING             Backup before removal, override usual suffix ('~')\n"
         "  -T, --files-from=FILE           Get names to extract or create from FILE\n"
-        "      --verbatim-files-from       -T reads file names verbatim (no option handling)\n"
+        "      --unquote                   Unquote input file or member names (default)\n"
+        "      --verbatim-files-from       -T reads file names verbatim (no option/unquote handling)\n"
         "      --wildcards                 Use wildcards (default)\n"
         "      --wildcards-match-slash      Wildcards match '/' when on by default\n"
         "  -X, --exclude-from=FILE         Exclude patterns listed in FILE\n"
@@ -5616,14 +6057,17 @@ static void print_usage(const char* prog) {
         "      --no-quote-chars=STRING     Disable quoting for characters from STRING\n"
         "      --quote-chars=STRING        Additionally quote characters from STRING\n"
         "      --quoting-style=STYLE       Set name quoting for -t / verbose extract\n"
-        "                                  (literal, escape, c, c-maybe, shell, shell-always)\n"
+        "                                  (literal escape c c-maybe shell shell-always\n"
+        "                                   shell-escape shell-escape-always locale clocale)\n"
         "  -R, --block-number              Show block number within archive with each message\n"
         "      --restrict                  Forbid -P/--absolute-names, --to-command, multi-volume\n"
         "      --show-defaults             Show tar defaults\n"
         "      --show-omitted-dirs         When listing or extracting, list each directory that does not match search criteria\n"
+        "      --show-snapshot-field-ranges  Show valid ranges for snapshot-file fields\n"
         "      --show-stored-names         Same as --show-transformed-names\n"
         "      --show-transformed-names    Show file or archive names after transformation\n"
-        "      --totals[=SIGNAL]           Print total bytes after processing the archive\n"
+        "      --totals[=SIGNAL]           Print total bytes after processing the archive;\n"
+        "                                  with SIGNAL (HUP/QUIT/INT/USR1/USR2) print on signal too\n"
         "      --usage                     Give a short usage message\n"
         "      --utc                       Print file modification times in UTC\n"
         "  -v, --verbose                   Verbosely list files processed\n"
@@ -5631,6 +6075,8 @@ static void print_usage(const char* prog) {
         "  -w, --interactive, --confirmation  Ask for confirmation for every action\n"
         "      --warning=KEYWORD           Warning control\n"
         "  -K, --starting-file=MEMBER-NAME  Begin at member MEMBER-NAME when reading the archive\n"
+        "\nCompatibility options:\n"
+        "  -o                             Create: same as --old-archive (v7); extract: --no-same-owner\n"
         "\nFormats: v7, oldgnu, gnu (default), ustar, pax/posix\n");
 }
 
@@ -5654,14 +6100,24 @@ int main(int argc, char* argv[]) {
         return EXIT_FAILURE;
     }
 
-    // Handle --help / --version early (before full parse)
+    // Handle --help / --version / --show-snapshot-field-ranges early
     for (int i = 1; i < argc; ++i) {
         std::string_view arg(argv[i]);
         if (arg == "--help" || arg == "-?" ) { print_usage(argv[0]);  return EXIT_SUCCESS; }
         if (arg == "--version")              { print_version();        return EXIT_SUCCESS; }
+        if (arg == "--show-snapshot-field-ranges") {
+            print_snapshot_field_ranges();
+            return EXIT_SUCCESS;
+        }
     }
 
     Config cfg = parse_args(argc, argv);
+
+    // --show-snapshot-field-ranges may also appear after other opts via getopt
+    if (cfg.show_snapshot_field_ranges) {
+        print_snapshot_field_ranges();
+        return EXIT_SUCCESS;
+    }
 
     if (cfg.op == Operation::None) {
         print(stderr, "mutar: You must specify one of the '-Acdtrux', "
@@ -5672,6 +6128,10 @@ int main(int argc, char* argv[]) {
     // --restrict: reject dangerous option combinations before any I/O
     if (!enforce_restrict(cfg))
         return EXIT_FAILURE;
+
+    // --totals=SIGNAL: install handler for running totals dump
+    if (cfg.totals && cfg.totals_signal > 0)
+        install_totals_signal(cfg.totals_signal);
 
     switch (cfg.op) {
     case Operation::Create:    return op_create(cfg);

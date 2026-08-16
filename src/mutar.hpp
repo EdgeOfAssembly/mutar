@@ -251,14 +251,17 @@ struct Config {
     bool remove_files        = false;   // --remove-files
     bool incremental         = false;   // -G (old incremental)
     bool ignore_failed_read  = false;   // --ignore-failed-read
+    bool ignore_command_error = false;  // --ignore-command-error (default: treat as error)
     bool check_links         = false;   // --check-links
     bool delay_dir_restore   = false;   // --delay-directory-restore
     bool block_number        = false;   // -R
     bool totals              = false;   // --totals
+    int  totals_signal       = 0;       // --totals=SIGNAL (0 = end-of-op only)
     bool utc                 = false;   // --utc
     bool full_time           = false;   // --full-time
     bool show_omitted_dirs   = false;   // --show-omitted-dirs
     bool show_transformed    = false;   // --show-transformed-names
+    bool show_snapshot_field_ranges = false; // --show-snapshot-field-ranges
     bool null_terminated     = false;   // --null / -0
     bool seek                = true;    // -n / --seek (default auto)
     bool force_local         = false;   // --force-local
@@ -275,13 +278,14 @@ struct Config {
     bool restrict_opt        = false;   // --restrict
     bool check_device         = true;    // --check-device (default on for incremental)
     bool atime_preserve      = false;   // --atime-preserve
+    std::string atime_preserve_method;  // "replace" (default) or "system"
 
     bool   no_recursion        = false;  // --no-recursion
     bool   no_auto_compress    = false;  // --no-auto-compress
     bool   verbatim_files_from = false;  // --verbatim-files-from
     bool   exclude_backups     = false;  // --exclude-backups
     bool   exclude_vcs         = false;  // --exclude-vcs
-    bool   compat_o            = false;  // -o compat
+    bool   compat_o            = false;  // -o compat (create: v7; extract: no-same-owner)
     int    checkpoint          = 0;      // --checkpoint[=N]
     std::string checkpoint_action;       // --checkpoint-action
     std::string index_file;              // --index-file (GNU: verbose routing)
@@ -294,8 +298,10 @@ struct Config {
     bool   ignore_case         = false;  // --ignore-case
     bool wildcards             = true;   // --wildcards / --no-wildcards
     bool wildcards_match_slash = true;   // --wildcards-match-slash / --no-wildcards-match-slash
-    bool unquote               = true;   // --unquote / --no-unquote
+    bool unquote               = true;   // --unquote / --no-unquote (default on)
     std::string quoting_style;           // --quoting-style
+    std::string quote_chars;             // --quote-chars=STRING (extra chars to quote)
+    std::string no_quote_chars;          // --no-quote-chars=STRING (never quote these)
     bool preserve_order        = false;  // -s / --preserve-order / --same-order
     bool overwrite_dir         = true;   // --overwrite-dir (default: true)
     bool exclude_vcs_ignores   = false;  // --exclude-vcs-ignores
@@ -309,8 +315,9 @@ struct Config {
     int  strip_components    = 0;
     int  occurrence          = 0;
     long tape_length         = 0;
-    unsigned sparse_major    = 1;
-    unsigned sparse_minor    = 0;
+    unsigned sparse_major    = 1;        // --sparse-version MAJOR
+    unsigned sparse_minor    = 0;        // --sparse-version MINOR
+
 
     // Extended features
     bool clamp_mtime          = false;   // --clamp-mtime

@@ -128,7 +128,7 @@ Legend:
 | `-p` / `--preserve-permissions` / `--same-permissions` | ✅ | |
 | `--no-same-permissions` | ✅ | |
 | `-m` / `--touch` | ✅ | |
-| `--atime-preserve[=METHOD]` | ✅ | |
+| `--atime-preserve[=METHOD]` | ✅ | Phase 1: `replace` (restore atime) / `system` (O_NOATIME); invalid method rejected |
 | `--utc` | ✅ | |
 | `--full-time` | 🔧 | Nanosecond timestamps now shown in `--list` |
 | `--xattrs` / `--no-xattrs` | ✅ | When `MUTAR_HAVE_XATTR`: create stores via `llistxattr`/`lgetxattr` as PAX `SCHILY.xattr.*` (raw values, GNU interop); extract restores with `lsetxattr`. Create+restore skip privileged namespaces `security.*`, `trusted.*`, `system.*` (ACLs via `--acls`). |
@@ -152,8 +152,9 @@ Legend:
 | `-U` / `--unlink-first` | ✅ | |
 | `--recursive-unlink` | ✅ | |
 | `--no-overwrite-dir` | ✅ | PR #172: skips dir mtime/mode fixup when target exists |
-| `-s` / `--preserve-order` / `--same-order` | ⚠️ | Accepted; emits not-implemented warning; not wired into traversal |
-| `-p` / `--preserve` | ✅ | |
+| `-s` / `--preserve-order` / `--same-order` | ⚠️ | Flag stored; full extract order constraint is Phase 7; `-s` still warns |
+| `--preserve` | ✅ | Phase 1: longopt sets `-p` + `-s` flags |
+| `-p` / `--preserve-permissions` | ✅ | |
 | `--delay-directory-restore` | ✅ | |
 
 ### Sparse Files
@@ -161,7 +162,7 @@ Legend:
 | Option | Status | Notes |
 |--------|--------|-------|
 | `-S` / `--sparse` | ✅ | GNU 'S' format |
-| `--sparse-version=M.N` | ⚠️ | String stored only; write path hardcodes GNU.sparse 1.0 (major/minor never parsed from CLI) |
+| `--sparse-version=M.N` | ✅ | Phase 1: parses 0.0/0.1/1.0 into `sparse_major`/`sparse_minor`; rejects unknown; implies `-S`; 1.x PAX map / 0.x GNU `S` |
 | `--hole-detection=METHOD` | 🔧 | `seek` / `raw` wired into `detect_sparse_segments()` |
 
 ### Informational / Output
@@ -170,7 +171,7 @@ Legend:
 |--------|--------|-------|
 | `-v` / `--verbose` | ✅ | |
 | `-R` / `--block-number` | ✅ | |
-| `--totals[=SIGNAL]` | ✅ | |
+| `--totals[=SIGNAL]` | ✅ | Phase 1: optional SIGNAL (HUP/QUIT/INT/USR1/USR2) prints running totals; end-of-op totals kept |
 | `--utc` | ✅ | |
 | `--index-file=FILE` | 🆕 | Now opens and writes during create/list/extract |
 | `--show-omitted-dirs` | 🔧 | Wired into create directory walk |
@@ -179,7 +180,13 @@ Legend:
 | `--checkpoint-action=ACTION` | 🆕 | `dot/echo/ttyout` via `do_checkpoint()` |
 | `--warning=KEYWORD` | 🆕 | Warning set processing implemented |
 | `--restrict` | ✅ | Phase E: rejects `-P`, `--to-command`, multi-volume |
-| `--quoting-style=STYLE` | ✅ | Phase E: applied on `-t` / verbose extract |
+| `--quoting-style=STYLE` | ✅ | Phase 1: + `shell-escape`, `shell-escape-always`, `locale`, `clocale`; applied on `-t` / verbose extract |
+| `--quote-chars=STRING` / `--no-quote-chars=STRING` | ✅ | Phase 1: extra always-quote / never-quote char classes in `quote_name()` |
+| `--unquote` / `--no-unquote` | ✅ | Phase 1: applied to `-T` and positional names (default on) |
+| `--verbatim-files-from` / `--no-verbatim-files-from` | ✅ | Phase 1: verbatim disables option/unquote on `-T` lines; default treats leading `-` as option |
+| `--ignore-command-error` / `--no-ignore-command-error` | ✅ | Phase 1: wired to `--to-command` child exit (default: failure) |
+| `--show-snapshot-field-ranges` | ✅ | Phase 1: prints MUTAR_SNAPSHOT_V2 name/mtime/dev ranges |
+| `-o` (create) | ✅ | Phase 1: create forces V7 like GNU; extract keeps no-same-owner |
 
 ### Hard Links & Labels
 
@@ -564,7 +571,7 @@ compatibility.
 | `--restrict` | `restrict_opt` | ✅ Phase E: rejects `-P`/`--absolute-names`, `--to-command`, multi-volume |
 | `--quoting-style` | `quoting_style` | ✅ Phase E: `literal`/`escape`/`c`/`c-maybe`/`shell`/`shell-always` for `-t` and verbose extract |
 | `--backup` / `--suffix` | `backup`, `backup_control`, `backup_suffix` | ✅ Phase E: `none`/`off`, `simple`/`never`, `numbered`/`t`, `existing`/`nil` |
-| `--sparse-version` | `sparse_version` | ⚠️ String stored; `sparse_major`/`sparse_minor` never parsed; write hardcodes 1.0 |
+| `--sparse-version` | `sparse_version` + major/minor | ✅ Phase 1: 0.0/0.1/1.0 parsed; write uses major/minor |
 | `-L` / `--tape-length` | `tape_length_str`, `tape_length` | ✅ Phase C: numeric parse into `tape_length`; implies `-M` |
 | `--xattrs` / `--acls` | `xattrs`, `acls` | ✅ Store/restore via SCHILY PAX (GOAL_NEXT Phase D / G6–G8); SELinux still unsupported |
 | `--selinux` / `--no-selinux` | `selinux` | **Unsupported by policy** (no test hardware); accepted as no-op with warning |
@@ -645,7 +652,7 @@ Key interop checks in `run_tests.sh`:
 |----|------|--------|-------|
 | G13 | `--restrict` | ✅ Implemented | Rejects `-P`/`--absolute-names`, `--to-command`, multi-volume (`-M`/`-L`/`-F`); clear error + non-zero exit |
 | G15 | `--backup` CONTROL | ✅ Implemented | `none`/`off`, `simple`/`never` (suffix), `numbered`/`t` (`file.~N~`), `existing`/`nil` |
-| G12 | `--quoting-style` | ✅ Implemented | `literal`, `escape`, `c`, `c-maybe`, `shell`, `shell-always` on `-t` and verbose extract |
+| G12 | `--quoting-style` | ✅ Implemented | + Phase 1: `shell-escape`, `shell-escape-always`, `locale`, `clocale` |
 | G14 | `--check-device` | ✅ Implemented | `Config::check_device` default true; snapshot V2 stores `st_dev`; re-archive when device changes |
 | G10 | Incremental dirs | ⚠️ Partial | Snapshot records directories + specials; skip filter remains regular-file mtime (+dev) |
 | G11 | rmt lseek | 📄 Documented only | Help + this file: rmt `S`/lseek and remote append not supported |
@@ -653,3 +660,24 @@ Key interop checks in `run_tests.sh`:
 **Tests:** `tests/test_phase_e.sh` (CTest `mutar_phase_e_tests`).
 
 **Snapshot format:** `MUTAR_SNAPSHOT_V2` lines are `name\tmtime\tdev`. V1 (`name\tmtime`) still readable.
+
+---
+
+## GOAL_GNU_PARITY Phase 1 — CLI quick wins (2026-08-16)
+
+| ID | Option | Status | Notes |
+|----|--------|--------|-------|
+| G0.1 | `--show-snapshot-field-ranges` | ✅ | Prints MUTAR_SNAPSHOT_V2 name/mtime/dev ranges (GNU-style layout) |
+| G1.2 | `--sparse-version=M.N` | ✅ | 0.0/0.1/1.0 → major/minor; unknown rejected; implies `-S`; write uses version |
+| G1.8 | `--unquote` / `--no-unquote` | ✅ | Applied to `-T` + positional names; default on |
+| G1.9 | `--verbatim-files-from` | ✅ | Verbatim: no option parse / no unquote on `-T`; default treats leading `-` as option |
+| G1.10 | `--ignore-command-error` | ✅ | Wired to `--to-command`; default treats non-zero child as failure |
+| G1.11 | `--quote-chars` / `--no-quote-chars` | ✅ | Separate from `--quoting-style`; overlays in `quote_name()` |
+| G1.13 | `--atime-preserve[=METHOD]` | ✅ | `replace` restores atime; `system` uses `O_NOATIME` when available |
+| G1.14 | `--totals[=SIGNAL]` | ✅ | SIGNAL installs handler for running totals; end totals kept |
+| G1.15 | `-o` on create | ✅ | Forces V7 format (extract still no-same-owner) |
+| G1.16 | `--quoting-style` | ✅ | + shell-escape, shell-escape-always, locale, clocale |
+| G1.17 | `--preserve` | ✅ | longopt = `-p` + `-s` flags (`-s` full extract order = Phase 7) |
+
+**Tests:** `tests/test_phase1_parity.sh` (CTest `mutar_phase1_parity_tests`).
+**Build:** Debug + ASan + UBSan.
