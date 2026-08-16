@@ -294,6 +294,12 @@ struct Config {
     bool        seekable    = false;     // --seekable (index + seek-friendly compress)
     std::string starting_file;           // -K / --starting-file
     std::vector<std::string> exclude_from; // -X / --exclude-from (filenames)
+    // --exclude-ignore=FILE: if FILE exists in a directory, patterns apply to
+    // that directory's immediate children only (not a global -X list).
+    std::vector<std::string> exclude_ignore;
+    // --exclude-ignore-recursive=FILE: same, but patterns apply to the whole
+    // subtree under the directory that contains FILE.
+    std::vector<std::string> exclude_ignore_recursive;
     bool   anchored            = false;  // --anchored/--no-anchored (GNU tar default: --no-anchored)
     bool   ignore_case         = false;  // --ignore-case
     bool wildcards             = true;   // --wildcards / --no-wildcards

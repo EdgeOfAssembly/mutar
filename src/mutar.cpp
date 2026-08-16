@@ -2126,6 +2126,22 @@ public:
         return true;
     }
 
+    /// Write a GNU dumpdir directory member (typeflag 'D') with body.
+    /// Body is NUL-separated "Cname" records (C in {Y,N,D,...}) plus a final NUL.
+    bool write_dumpdir(Entry& e, std::string_view body, const Config& cfg) {
+        if (!e.name.empty() && e.name.back() != '/') e.name += '/';
+        e.typeflag = GNUTYPE_DUMPDIR;
+        e.size     = static_cast<std::int64_t>(body.size());
+        e.asize    = e.size;
+        record_index_entry(e);
+        maybe_write_extensions(e, cfg);
+        Block hblk = encode_header(e, cfg);
+        buf_.write_block(*stream_, hblk);
+        if (!body.empty())
+            write_data_bytes(body.data(), body.size());
+        return true;
+    }
+
     void write_data_bytes(const char* data, std::size_t sz) {
         std::size_t offset = 0;
         while (offset < sz) {
@@ -2751,57 +2767,102 @@ static std::string strip_components(std::string_view path, int n) {
     return std::string(path);
 }
 
+// Match a single exclude pattern against name (full path and/or components).
+static bool pattern_matches_name(const Config& cfg, std::string_view name,
+                                 const std::string& pat) {
+    if (!cfg.wildcards) {
+        // Literal string matching
+        std::string sname(name);
+        if (cfg.anchored) {
+            if (cfg.ignore_case ? ::strcasecmp(sname.c_str(), pat.c_str()) == 0
+                                : sname == pat)
+                return true;
+        } else {
+            if (cfg.ignore_case ? ::strcasecmp(sname.c_str(), pat.c_str()) == 0
+                                : sname == pat)
+                return true;
+            std::string_view rem = name;
+            while (!rem.empty()) {
+                auto slash = rem.find('/');
+                std::string_view comp = (slash == std::string_view::npos) ? rem : rem.substr(0, slash);
+                std::string scomp(comp);
+                if (!comp.empty() && (cfg.ignore_case
+                        ? ::strcasecmp(scomp.c_str(), pat.c_str()) == 0
+                        : scomp == pat))
+                    return true;
+                if (slash == std::string_view::npos) break;
+                rem = rem.substr(slash + 1);
+            }
+        }
+    } else {
+        int flags = FNM_LEADING_DIR;
+        if (!cfg.wildcards_match_slash) flags |= FNM_PATHNAME;
+        if (cfg.ignore_case)            flags |= FNM_CASEFOLD;
+
+        if (::fnmatch(pat.c_str(), std::string(name).c_str(), flags) == 0)
+            return true;
+        if (!cfg.anchored || pat.find('/') == std::string::npos) {
+            int comp_flags = flags & ~FNM_PATHNAME;
+            std::string_view rem = name;
+            while (!rem.empty()) {
+                auto slash = rem.find('/');
+                std::string_view comp = (slash == std::string_view::npos) ? rem : rem.substr(0, slash);
+                if (!comp.empty() &&
+                    ::fnmatch(pat.c_str(), std::string(comp).c_str(), comp_flags) == 0)
+                    return true;
+                if (slash == std::string_view::npos) break;
+                rem = rem.substr(slash + 1);
+            }
+        }
+    }
+    return false;
+}
+
 // Check if 'name' matches any exclude pattern, respecting cfg matching flags.
 static bool is_excluded(const Config& cfg, std::string_view name) {
     for (const auto& pat : cfg.exclude_patterns) {
-        if (!cfg.wildcards) {
-            // Literal string matching
-            std::string sname(name);
-            if (cfg.anchored) {
-                if (cfg.ignore_case ? ::strcasecmp(sname.c_str(), pat.c_str()) == 0
-                                    : sname == pat)
-                    return true;
-            } else {
-                // Match against the full path AND each path component
-                if (cfg.ignore_case ? ::strcasecmp(sname.c_str(), pat.c_str()) == 0
-                                    : sname == pat)
-                    return true;
-                std::string_view rem = name;
-                while (!rem.empty()) {
-                    auto slash = rem.find('/');
-                    std::string_view comp = (slash == std::string_view::npos) ? rem : rem.substr(0, slash);
-                    std::string scomp(comp);
-                    if (!comp.empty() && (cfg.ignore_case
-                            ? ::strcasecmp(scomp.c_str(), pat.c_str()) == 0
-                            : scomp == pat))
-                        return true;
-                    if (slash == std::string_view::npos) break;
-                    rem = rem.substr(slash + 1);
-                }
-            }
-        } else {
-            // Wildcard (fnmatch) matching
-            int flags = FNM_LEADING_DIR;
-            if (!cfg.wildcards_match_slash) flags |= FNM_PATHNAME;
-            if (cfg.ignore_case)            flags |= FNM_CASEFOLD;
+        if (pattern_matches_name(cfg, name, pat))
+            return true;
+    }
+    return false;
+}
 
-            // Full path match
-            if (::fnmatch(pat.c_str(), std::string(name).c_str(), flags) == 0)
+// Read exclude patterns from a per-directory ignore file (one pattern per line).
+// Skips empty lines and '#' comments. Returns patterns in file order.
+static std::vector<std::string> read_ignore_file_patterns(const std::string& path) {
+    std::vector<std::string> pats;
+    std::ifstream ifs(path);
+    if (!ifs) return pats;
+    std::string line;
+    while (std::getline(ifs, line)) {
+        if (line.empty() || line[0] == '#') continue;
+        while (!line.empty() && (line.back() == ' ' || line.back() == '\t' ||
+                                 line.back() == '\r'))
+            line.pop_back();
+        if (!line.empty())
+            pats.push_back(std::move(line));
+    }
+    return pats;
+}
+
+// True if basename or archname matches any pattern in the list (fnmatch).
+static bool matches_ignore_patterns(const Config& cfg,
+                                    const std::vector<std::string>& pats,
+                                    std::string_view basename,
+                                    std::string_view archname) {
+    for (const auto& pat : pats) {
+        int flags = 0;
+        if (cfg.ignore_case) flags |= FNM_CASEFOLD;
+        if (!cfg.wildcards_match_slash) flags |= FNM_PATHNAME;
+        if (cfg.wildcards) {
+            if (::fnmatch(pat.c_str(), std::string(basename).c_str(), flags) == 0)
                 return true;
-            // If not anchored or pattern has no '/', also match against path components
-            if (!cfg.anchored || pat.find('/') == std::string::npos) {
-                int comp_flags = flags & ~FNM_PATHNAME;
-                std::string_view rem = name;
-                while (!rem.empty()) {
-                    auto slash = rem.find('/');
-                    std::string_view comp = (slash == std::string_view::npos) ? rem : rem.substr(0, slash);
-                    if (!comp.empty() &&
-                        ::fnmatch(pat.c_str(), std::string(comp).c_str(), comp_flags) == 0)
-                        return true;
-                    if (slash == std::string_view::npos) break;
-                    rem = rem.substr(slash + 1);
-                }
-            }
+            if (::fnmatch(pat.c_str(), std::string(archname).c_str(), flags) == 0)
+                return true;
+        } else {
+            if (pattern_matches_name(cfg, basename, pat) ||
+                pattern_matches_name(cfg, archname, pat))
+                return true;
         }
     }
     return false;
@@ -2927,12 +2988,14 @@ static std::vector<SparseSegment> detect_sparse_segments(int fd, std::int64_t fi
     return segs;
 }
 
-// Recursive directory walker
+// Recursive directory walker.
+// @param inherited_ignore_pats  Patterns from ancestor --exclude-ignore-recursive
+//        files; applied to this directory's children and passed further down.
 static void walk_dir(const std::string& base_dir, const std::string& relpath,
                      const Config& cfg,
                      std::function<void(const std::string& archname, const std::string& fspath)> cb,
-                     dev_t same_dev = static_cast<dev_t>(-1)) {
-    namespace fs = std::filesystem;
+                     dev_t same_dev = static_cast<dev_t>(-1),
+                     const std::vector<std::string>& inherited_ignore_pats = {}) {
     std::string full = base_dir.empty() ? relpath : base_dir + "/" + relpath;
 
     struct stat st{};
@@ -3015,32 +3078,44 @@ static void walk_dir(const std::string& base_dir, const std::string& relpath,
         std::vector<std::string> vcs_patterns;
         if (cfg.exclude_vcs_ignores) {
             for (const char* ignore_file : {".gitignore", ".hgignore", ".cvsignore", ".bzrignore"}) {
-                std::ifstream ifs(full + "/" + ignore_file);
-                if (!ifs) continue;
-                std::string line;
-                while (std::getline(ifs, line)) {
-                    // Skip comments and empty lines
-                    if (line.empty() || line[0] == '#') continue;
-                    // Strip trailing whitespace
-                    while (!line.empty() && (line.back() == ' ' || line.back() == '\t'))
-                        line.pop_back();
-                    if (!line.empty()) vcs_patterns.push_back(line);
-                }
+                auto more = read_ignore_file_patterns(full + "/" + ignore_file);
+                vcs_patterns.insert(vcs_patterns.end(), more.begin(), more.end());
             }
         }
 
+        // --exclude-ignore / --exclude-ignore-recursive: per-directory ignore files
+        // Local (non-recursive) patterns apply only to this directory's children.
+        // Recursive patterns from this dir are merged into the inherited set for
+        // children (and also apply here).
+        std::vector<std::string> local_ignore_pats;
+        std::vector<std::string> child_ignore_pats = inherited_ignore_pats;
+        for (const auto& ign : cfg.exclude_ignore) {
+            auto more = read_ignore_file_patterns(full + "/" + ign);
+            local_ignore_pats.insert(local_ignore_pats.end(), more.begin(), more.end());
+        }
+        for (const auto& ign : cfg.exclude_ignore_recursive) {
+            auto more = read_ignore_file_patterns(full + "/" + ign);
+            child_ignore_pats.insert(child_ignore_pats.end(), more.begin(), more.end());
+        }
+
         for (const auto& ent : entries) {
+            std::string child_arch = (archname == "." || archname.empty())
+                ? ent : (archname + "/" + ent);
+
             // --exclude-vcs-ignores: check vcs ignore patterns for this entry
-            if (!vcs_patterns.empty()) {
-                bool ignored = false;
-                for (const auto& vpat : vcs_patterns) {
-                    int vflags = 0;
-                    if (cfg.ignore_case) vflags |= FNM_CASEFOLD;
-                    if (!cfg.wildcards_match_slash) vflags |= FNM_PATHNAME;
-                    if (::fnmatch(vpat.c_str(), ent.c_str(), vflags) == 0) { ignored = true; break; }
-                }
-                if (ignored) continue;
-            }
+            if (!vcs_patterns.empty() &&
+                matches_ignore_patterns(cfg, vcs_patterns, ent, child_arch))
+                continue;
+
+            // --exclude-ignore: patterns from FILE in this directory only
+            if (!local_ignore_pats.empty() &&
+                matches_ignore_patterns(cfg, local_ignore_pats, ent, child_arch))
+                continue;
+            // --exclude-ignore-recursive: this dir + ancestors
+            if (!child_ignore_pats.empty() &&
+                matches_ignore_patterns(cfg, child_ignore_pats, ent, child_arch))
+                continue;
+
             // --exclude-caches: keep only CACHEDIR.TAG, skip everything else
             if (cache_tag_present && cfg.exclude_caches && ent != "CACHEDIR.TAG")
                 continue;
@@ -3062,7 +3137,7 @@ static void walk_dir(const std::string& base_dir, const std::string& relpath,
                     continue;
                 }
             }
-            walk_dir("", child, cfg, cb, this_dev);
+            walk_dir("", child, cfg, cb, this_dev, child_ignore_pats);
         }
     }
 }
@@ -3315,12 +3390,163 @@ struct SnapRec {
     bool          has_dev = false;
 };
 
+/// True if path is unchanged vs snapshot (mtime + optional device).
+static bool snap_unchanged(const SnapRec& rec, const struct stat& st,
+                           bool check_device) {
+    if (static_cast<std::int64_t>(st.st_mtime) > rec.mtime)
+        return false;
+    if (check_device && rec.has_dev &&
+        static_cast<std::uint64_t>(st.st_dev) != rec.dev)
+        return false;
+    return true;
+}
+
+/// Build GNU dumpdir body for directory at @p fspath (archive name @p archname).
+/// Control codes: 'Y' = dump this non-dir, 'D' = subdirectory, 'N' = not dumped.
+/// @p snap / @p do_listed_inc control Y vs N for listed-incremental level≥1.
+static std::string build_dumpdir_body(
+    const std::string& fspath,
+    const std::string& archname,
+    const Config& cfg,
+    const std::map<std::string, SnapRec>* snap,
+    bool do_listed_inc)
+{
+    DIR* d = ::opendir(fspath.c_str());
+    if (!d) return std::string(1, '\0');
+
+    struct Ent { char code; std::string name; };
+    std::vector<Ent> ents;
+    while (struct dirent* de = ::readdir(d)) {
+        std::string_view dname(de->d_name);
+        if (dname == "." || dname == "..") continue;
+        std::string name(dname);
+        std::string child_fs = fspath + "/" + name;
+        std::string child_arch = (archname.empty() || archname == ".")
+            ? name
+            : (archname.back() == '/' ? archname + name : archname + "/" + name);
+        // Strip trailing slash from arch for snapshot lookup
+        while (!child_arch.empty() && child_arch.back() == '/')
+            child_arch.pop_back();
+
+        char code = 'Y';
+        if (is_excluded(cfg, child_arch)) {
+            code = 'N';
+        } else {
+            struct stat cst{};
+            if (::lstat(child_fs.c_str(), &cst) < 0) {
+                code = 'N';
+            } else if (S_ISDIR(cst.st_mode)) {
+                code = 'D';
+            } else if (do_listed_inc && snap) {
+                auto it = snap->find(child_arch);
+                if (it != snap->end() &&
+                    snap_unchanged(it->second, cst, cfg.check_device))
+                    code = 'N';
+                else
+                    code = 'Y';
+            } else {
+                code = 'Y';
+            }
+        }
+        ents.push_back({code, std::move(name)});
+    }
+    ::closedir(d);
+
+    std::ranges::sort(ents, [](const Ent& a, const Ent& b) {
+        return a.name < b.name;
+    });
+
+    std::string body;
+    for (const auto& e : ents) {
+        body.push_back(e.code);
+        body += e.name;
+        body.push_back('\0');
+    }
+    body.push_back('\0');
+    return body;
+}
+
+/// Recursively remove a filesystem path (for -G dumpdir purge).
+static bool remove_path_recursive(const std::string& path) {
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    fs::remove_all(path, ec);
+    return !ec;
+}
+
+/// Parse dumpdir body into map name → control code (first char of each record).
+static std::map<std::string, char> parse_dumpdir(std::string_view body) {
+    std::map<std::string, char> out;
+    std::size_t i = 0;
+    while (i < body.size()) {
+        if (body[i] == '\0') break;
+        char code = body[i];
+        ++i;
+        std::size_t start = i;
+        while (i < body.size() && body[i] != '\0') ++i;
+        if (i > start)
+            out[std::string(body.substr(start, i - start))] = code;
+        if (i < body.size() && body[i] == '\0') ++i;
+    }
+    return out;
+}
+
+/// Purge directory contents not listed (or type-mismatched) in dumpdir (GNU -G).
+static void purge_directory_dumpdir(const std::string& dirpath,
+                                    const std::map<std::string, char>& dump,
+                                    const Config& cfg) {
+    DIR* d = ::opendir(dirpath.c_str());
+    if (!d) return;
+    std::vector<std::string> names;
+    while (struct dirent* de = ::readdir(d)) {
+        std::string_view n(de->d_name);
+        if (n == "." || n == "..") continue;
+        names.emplace_back(n);
+    }
+    ::closedir(d);
+
+    for (const auto& name : names) {
+        auto it = dump.find(name);
+        std::string full = dirpath + "/" + name;
+        struct stat st{};
+        if (::lstat(full.c_str(), &st) < 0) continue;
+
+        bool should_delete = false;
+        if (it == dump.end()) {
+            should_delete = true;
+        } else if (it->second == 'D' && !S_ISDIR(st.st_mode)) {
+            should_delete = true;
+        } else if (it->second == 'Y' && S_ISDIR(st.st_mode)) {
+            should_delete = true;
+        }
+
+        if (!should_delete) continue;
+
+        if (cfg.interactive) {
+            std::fprintf(stderr, "mutar: delete `%s'? [y/N] ", full.c_str());
+            std::fflush(stderr);
+            std::string ans;
+            std::ifstream tty("/dev/tty");
+            if (tty.is_open()) std::getline(tty, ans);
+            else if (::isatty(STDIN_FILENO)) std::getline(std::cin, ans);
+            else ans = "n";
+            if (ans.empty() || (ans[0] != 'y' && ans[0] != 'Y'))
+                continue;
+        }
+        if (cfg.verbose)
+            print(stderr, "mutar: Deleting {}\n", full);
+        if (!remove_path_recursive(full))
+            print(stderr, "mutar: {}: cannot remove: {}\n", full, std::strerror(errno));
+    }
+}
+
 // ── Verbose line output (matching GNU tar format) ─────────────────────────────
 
 static std::string format_mode(char typeflag, unsigned mode) {
     char buf[11];
     switch (typeflag) {
-    case DIRTYPE:  buf[0] = 'd'; break;
+    case DIRTYPE:
+    case GNUTYPE_DUMPDIR: buf[0] = 'd'; break;
     case SYMTYPE:  buf[0] = 'l'; break;
     case LNKTYPE:  buf[0] = 'h'; break;
     case CHRTYPE:  buf[0] = 'c'; break;
@@ -3715,23 +3941,16 @@ static int op_create(const Config& cfg) {
                 }
             }
         }
-        // Incremental filter: skip regular files unchanged since last snapshot.
-        // Directories/symlinks/specials are always archived (GNU-like dump of
-        // metadata); they are still recorded in the snapshot for future use.
-        // With --check-device (default), a changed st_dev forces re-archive.
+        // Listed-incremental filter (level≥1): skip unchanged non-directories.
+        // GNU always dumps directory headers (structure); files, symlinks and
+        // specials are omitted when mtime (+ device with --check-device) match.
         if (do_incremental) {
             struct stat inc_st{};
-            if (::lstat(fspath.c_str(), &inc_st) == 0 && S_ISREG(inc_st.st_mode)) {
+            if (::lstat(fspath.c_str(), &inc_st) == 0 && !S_ISDIR(inc_st.st_mode)) {
                 auto sit = snapshot_map.find(raw_archname);
                 if (sit != snapshot_map.end() &&
-                    inc_st.st_mtime <= sit->second.mtime) {
-                    bool dev_changed = false;
-                    if (cfg.check_device && sit->second.has_dev &&
-                        static_cast<std::uint64_t>(inc_st.st_dev) != sit->second.dev)
-                        dev_changed = true;
-                    if (!dev_changed)
-                        return; // unchanged file, skip
-                }
+                    snap_unchanged(sit->second, inc_st, cfg.check_device))
+                    return; // unchanged; keep prior snapshot entry
             }
         }
 
@@ -3822,6 +4041,52 @@ static int op_create(const Config& cfg) {
             } else if (writer.block_no() > 0 &&
                        writer.block_no() + 3 > max_blocks) {
                 if (!rotate_volume()) return;
+            }
+        }
+
+        // -G / --incremental (and -g): emit GNU dumpdir directory members
+        if (cfg.incremental) {
+            struct stat dst{};
+            if (::lstat(fspath.c_str(), &dst) == 0 && S_ISDIR(dst.st_mode)) {
+                Entry de;
+                de.name       = archname;
+                de.mode       = dst.st_mode & 07777;
+                de.uid        = static_cast<unsigned>(dst.st_uid);
+                de.gid        = static_cast<unsigned>(dst.st_gid);
+                de.mtime      = dst.st_mtim.tv_sec;
+                de.mtime_nsec = static_cast<long>(dst.st_mtim.tv_nsec);
+                de.atime      = dst.st_atim.tv_sec;
+                de.ctime      = dst.st_ctim.tv_sec;
+                de.fmt        = fmt;
+                if (struct passwd* pw = ::getpwuid(dst.st_uid)) de.uname = pw->pw_name;
+                if (struct group*  gr = ::getgrgid(dst.st_gid)) de.gname = gr->gr_name;
+                if (cfg.numeric_owner) { de.uname.clear(); de.gname.clear(); }
+                if (!cfg.owner.empty()) de.uname = cfg.owner;
+                if (!cfg.group.empty()) de.gname = cfg.group;
+                if (!cfg.mtime.empty()) {
+                    std::time_t mt = parse_date_string(cfg.mtime);
+                    if (mt != (std::time_t)-1 &&
+                        (!cfg.clamp_mtime || de.mtime > mt)) {
+                        de.mtime = mt; de.mtime_nsec = 0;
+                    }
+                }
+                collect_xattrs(de, fspath, cfg);
+                collect_acls(de, fspath, cfg, true);
+                std::string body = build_dumpdir_body(
+                    fspath, raw_archname, cfg,
+                    do_incremental ? &snapshot_map : nullptr,
+                    do_incremental);
+                if (!writer.write_dumpdir(de, body, cfg))
+                    exit_code = EXIT_FAILURE;
+                else if (cfg.remove_files)
+                    files_to_remove.push_back(fspath);
+                // --checkpoint progress
+                if (cfg.checkpoint > 0) {
+                    ++checkpoint_count;
+                    if (checkpoint_count % cfg.checkpoint == 0)
+                        do_checkpoint(cfg, checkpoint_count);
+                }
+                return;
             }
         }
 
@@ -4366,9 +4631,73 @@ static int op_extract(const Config& cfg) {
         case GNUTYPE_LONGNAME:
         case GNUTYPE_LONGLINK:
         case GNUTYPE_VOLHDR:
-        case GNUTYPE_DUMPDIR:
             reader.skip_entry(e);
             break;
+        case GNUTYPE_DUMPDIR:
+        {
+            // GNU old incremental directory: create dir, optional purge, consume body
+            std::string dpath = outpath;
+            while (!dpath.empty() && dpath.back() == '/') dpath.pop_back();
+            if (dpath.empty()) dpath = ".";
+
+            // Same keep-directory-symlink / overwrite-dir guards as DIRTYPE
+            if (cfg.keep_dir_symlink) {
+                struct stat lnk_st{};
+                if (::lstat(dpath.c_str(), &lnk_st) == 0 && S_ISLNK(lnk_st.st_mode)) {
+                    struct stat tgt_st{};
+                    if (::stat(dpath.c_str(), &tgt_st) == 0 && S_ISDIR(tgt_st.st_mode)) {
+                        if (cfg.incremental && e.size > 0) {
+                            std::string body = reader.read_data_string(e.size);
+                            auto dump = parse_dumpdir(body);
+                            purge_directory_dumpdir(dpath, dump, cfg);
+                        } else {
+                            reader.skip_entry(e);
+                        }
+                        dir_fixups.push_back({dpath, e.mtime, e.mtime_nsec, e.mode});
+                        break;
+                    }
+                }
+            }
+
+            struct stat existing_st{};
+            bool path_exists = (::lstat(dpath.c_str(), &existing_st) == 0);
+            if (path_exists && !S_ISDIR(existing_st.st_mode)) {
+                print(stderr, "mutar: {}: Cannot overwrite non-directory with directory\n", dpath);
+                reader.skip_entry(e);
+                break;
+            }
+            ::mkdir(dpath.c_str(), 0777);
+
+            // Read dumpdir body then purge extras when -G/--incremental
+            if (e.size > 0) {
+                std::string body = reader.read_data_string(e.size);
+                if (cfg.incremental) {
+                    auto dump = parse_dumpdir(body);
+                    purge_directory_dumpdir(dpath, dump, cfg);
+                }
+            }
+
+            if (path_exists && cfg.no_overwrite_dir) {
+                if (cfg.verbose)
+                    print(stderr, "mutar: {}: directory already exists, skipping metadata update\n", dpath);
+                break;
+            }
+            if (cfg.no_delay_dir_restore) {
+                if (!cfg.touch) {
+                    struct timespec ts[2];
+                    ts[0].tv_sec = ts[1].tv_sec  = e.mtime;
+                    ts[0].tv_nsec = ts[1].tv_nsec = e.mtime_nsec;
+                    ::utimensat(AT_FDCWD, dpath.c_str(), ts, 0);
+                }
+                bool set_perm = cfg.same_permissions ||
+                                (::getuid() == 0 && !cfg.no_same_permissions);
+                if (set_perm) ::chmod(dpath.c_str(), e.mode & 07777);
+            } else {
+                dir_fixups.push_back({dpath, e.mtime, e.mtime_nsec, e.mode});
+            }
+            restore_xattrs_acls(e, dpath, cfg);
+            break;
+        }
         default: // REGTYPE ('0'), AREGTYPE ('\0' old V7 regular), CONTTYPE ('7')
         {
             // AREGTYPE ('\0') with a name ending in '/' is an old implicit-directory
@@ -5191,8 +5520,8 @@ static const struct option long_opts[] = {
     {"exclude-tag-all",  required_argument, nullptr, OPT_EXCLUDE_TAG_ALL},
     {"exclude-tag-under",required_argument, nullptr, OPT_EXCLUDE_TAG_UNDER},
     {"bzip",             no_argument,       nullptr, 'j'},
-    {"exclude-ignore",   required_argument, nullptr, OPT_EXCLUDE_FROM},
-    {"exclude-ignore-recursive",required_argument,nullptr,OPT_EXCLUDE_FROM},
+    {"exclude-ignore",   required_argument, nullptr, OPT_EXCLUDE_IGNORE},
+    {"exclude-ignore-recursive",required_argument,nullptr,OPT_EXCLUDE_IGNORE_RECURSIVE},
     {"quote-chars",      required_argument, nullptr, OPT_QUOTE_CHARS},
     {"no-quote-chars",   required_argument, nullptr, OPT_NO_QUOTE_CHARS},
     {"strip",            required_argument, nullptr, OPT_STRIP_COMPONENTS},
@@ -5632,6 +5961,12 @@ static Config parse_args(int argc, char* argv[]) {
             cfg.write_index = true;
             break;
         case OPT_EXCLUDE_FROM:       cfg.exclude_from.emplace_back(::optarg); break;
+        case OPT_EXCLUDE_IGNORE:
+            cfg.exclude_ignore.emplace_back(::optarg);
+            break;
+        case OPT_EXCLUDE_IGNORE_RECURSIVE:
+            cfg.exclude_ignore_recursive.emplace_back(::optarg);
+            break;
         case OPT_COMPRESS:           cfg.compress = Compress::CompressZ; break;
         case OPT_NO_RECURSION:       cfg.no_recursion = true; break;
         case OPT_RECURSION:          cfg.no_recursion = false; break;
@@ -6010,8 +6345,10 @@ static void print_usage(const char* prog) {
         "      --exclude-caches            Exclude contents of directories containing CACHEDIR.TAG\n"
         "      --exclude-caches-all        Exclude directories containing CACHEDIR.TAG\n"
         "      --exclude-caches-under      Exclude everything under directories containing CACHEDIR.TAG\n"
-        "      --exclude-ignore=FILE       Read exclude patterns from FILE\n"
-        "      --exclude-ignore-recursive=FILE  Read exclude patterns from FILE, applying them recursively\n"
+        "      --exclude-ignore=FILE       If FILE exists in a directory, read patterns\n"
+        "                                  and apply them to that directory's children only\n"
+        "      --exclude-ignore-recursive=FILE  Like --exclude-ignore, but patterns apply\n"
+        "                                  to the whole subtree under that directory\n"
         "      --exclude-tag=FILE          Exclude contents of directories containing FILE\n"
         "      --exclude-tag-all=FILE      Exclude directories containing FILE\n"
         "      --exclude-tag-under=FILE    Exclude everything under directories containing FILE\n"

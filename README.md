@@ -216,7 +216,8 @@ Magic-byte auto-detection works on read even without `-a`.
 | `--quoting-style` | ✅ | `literal`/`escape`/`c`/`c-maybe`/`shell`/`shell-always` for `-t` and verbose extract |
 | `--xattrs` / `--acls` | ✅ | Store/restore via PAX `SCHILY.xattr.*` / `SCHILY.acl.*` when built with lib support; SELinux never stored |
 | `--selinux` / `--no-selinux` | ❌ Unsupported | Policy: no-op + warning (no test hardware) |
-| `-G -g --listed-incremental` | ⚠️ Partial | Snapshot V2 records files+dirs (mtime+dev); skip filter is regular-file mtime (+dev); dirs always dumped |
+| `-G -g --listed-incremental` | ✅ | `-G` dumpdir create/extract purge; `-g` snapshot V2; level≥1 skips unchanged files/symlinks/specials; dirs always dumped |
+| `--exclude-ignore{,-recursive}` | ✅ | Per-directory ignore files (children only vs whole subtree) |
 | `--multi-volume -M -L` | ⚠️ Partial | Between-member rotation + extract stream swap; mid-file split not supported |
 | `--rsh-command --rmt-command` | ⚠️ Partial | rmt O/R/W/C bridge via rsh; lseek (`S`) / remote append not supported |
 | `--backup --suffix` | ✅ | `none`/`off`, `simple`/`never`, `numbered`/`t`, `existing`/`nil` (+ `--suffix`) |
@@ -231,7 +232,7 @@ Magic-byte auto-detection works on read even without `-a`.
 | Feature | Notes |
 |---------|-------|
 | SELinux | Unsupported by policy (`--selinux` no-op + warning); never stored under `--xattrs` |
-| Incremental backups (`-G -g`) | Snapshot V2 has dirs+dev; skip still regular-file only (dirs always dumped) |
+| Incremental backups (`-G -g`) | ✅ dumpdir + listed-incremental skip (see COMPATIBILITY_PROGRESS Phase 3) |
 | Remote tape (`--rsh/rmt-command`) | Bridge works; lseek over rmt / remote append not implemented |
 | Multi-volume mid-file split | Between-member works; single file > tape length errors (no GNUTYPE_MULTIVOL) |
 | `--pax-option` keyword processing | `delete=KEYWORD` only; full GNU set not implemented |

@@ -207,9 +207,9 @@ Legend:
 
 | Option | Status | Notes |
 |--------|--------|-------|
-| `-G` / `--incremental` | ⚠️ | Parsed; old incremental format not maintained |
-| `-g` / `--listed-incremental=FILE` | 🔧 | PR #172: snapshot file written on level-0; level≥1 reads snapshot and skips unchanged files |
-| `--level=N` | 🔧 | PR #172: `--level=0` creates fresh snapshot; `--level=1` reads and uses snapshot for incremental |
+| `-G` / `--incremental` | ✅ | Phase 3: GNU dumpdir (type `D`) create with Y/N/D entries; extract with `-G` purges extras; GNU tar can list mutar archives |
+| `-g` / `--listed-incremental=FILE` | ✅ | Phase 3: snapshot V2; level≥1 skips unchanged files/symlinks/specials (mtime+dev); dirs always dumped (GNU-like) |
+| `--level=N` | ✅ | `--level=0` truncates snapshot; `--level≥1` uses snapshot for skip filter |
 | `--ignore-failed-read` | ✅ | |
 
 ### Multi-Volume
@@ -575,7 +575,8 @@ compatibility.
 | `-L` / `--tape-length` | `tape_length_str`, `tape_length` | ✅ Phase C: numeric parse into `tape_length`; implies `-M` |
 | `--xattrs` / `--acls` | `xattrs`, `acls` | ✅ Store/restore via SCHILY PAX (GOAL_NEXT Phase D / G6–G8); SELinux still unsupported |
 | `--selinux` / `--no-selinux` | `selinux` | **Unsupported by policy** (no test hardware); accepted as no-op with warning |
-| `-G` / `-g` (incremental) | `listed_incremental` | ⚠️ Phase E: snapshot **V2** (`name\tmtime\tdev`) records files **and directories**; level≥1 skip is still **regular-file mtime** (+ device when `--check-device`); dirs/symlinks/specials always archived |
+| `-G` / `-g` (incremental) | `listed_incremental`, `incremental` | ✅ Phase 3: dumpdir create/extract (`-G`); listed-incremental skip for files/symlinks/specials; dirs always dumped; snapshot V2 |
+| `--exclude-ignore` / `--exclude-ignore-recursive` | `exclude_ignore`, `exclude_ignore_recursive` | ✅ Phase 2: per-directory ignore files (not global `-X`) |
 | `-M` (multi-volume) | `multi_volume` | ⚠️ Phase C: between-member stream swap create+extract; **mid-file split still TODO** |
 | `--rsh-command` / `--rmt-command` | `rsh_command`, `rmt_command` | 🔧 PR #172: rmt bridge via rsh fork+pipe; O/R/W/C protocol implemented. **Limitation (G11):** rmt `lseek`/`S` and remote append not implemented (documented in `--help`) |
 | PAX sparse write format | `fmt_` | ✅ PR #172: when `--format=pax`, GNU.sparse.* PAX keywords emitted; GNU.sparse.map parsed on read |
@@ -654,7 +655,7 @@ Key interop checks in `run_tests.sh`:
 | G15 | `--backup` CONTROL | ✅ Implemented | `none`/`off`, `simple`/`never` (suffix), `numbered`/`t` (`file.~N~`), `existing`/`nil` |
 | G12 | `--quoting-style` | ✅ Implemented | + Phase 1: `shell-escape`, `shell-escape-always`, `locale`, `clocale` |
 | G14 | `--check-device` | ✅ Implemented | `Config::check_device` default true; snapshot V2 stores `st_dev`; re-archive when device changes |
-| G10 | Incremental dirs | ⚠️ Partial | Snapshot records directories + specials; skip filter remains regular-file mtime (+dev) |
+| G10 | Incremental dirs | ✅ Phase 3 | Snapshot records dirs+specials; skip filter covers files/symlinks/specials; dirs always dumped |
 | G11 | rmt lseek | 📄 Documented only | Help + this file: rmt `S`/lseek and remote append not supported |
 
 **Tests:** `tests/test_phase_e.sh` (CTest `mutar_phase_e_tests`).
@@ -680,4 +681,33 @@ Key interop checks in `run_tests.sh`:
 | G1.17 | `--preserve` | ✅ | longopt = `-p` + `-s` flags (`-s` full extract order = Phase 7) |
 
 **Tests:** `tests/test_phase1_parity.sh` (CTest `mutar_phase1_parity_tests`).
+**Build:** Debug + ASan + UBSan.
+
+---
+
+## GOAL_GNU_PARITY Phase 2 — exclude-ignore (G1.12) (2026-08-16)
+
+| ID | Option | Status | Notes |
+|----|--------|--------|-------|
+| G1.12 | `--exclude-ignore=FILE` | ✅ | If `FILE` exists in a directory while walking, patterns apply to that directory's **immediate children only** (not a global `-X` list) |
+| G1.12 | `--exclude-ignore-recursive=FILE` | ✅ | Same, but patterns apply to the **whole subtree** under the directory that contains `FILE` |
+
+Previously both long options were miswired to `OPT_EXCLUDE_FROM` (global pattern file). They now use dedicated config vectors and are applied in `walk_dir`.
+
+**Tests:** `tests/test_phase2_3_parity.sh` (CTest `mutar_phase2_3_parity_tests`) — nested dirs, non-recursive vs recursive.
+
+---
+
+## GOAL_GNU_PARITY Phase 3 — incremental -G / -g (G1.4, G1.5) (2026-08-16)
+
+| ID | Option | Status | Notes |
+|----|--------|--------|-------|
+| G1.4 | `-G` / `--incremental` | ✅ | Create: directory members use `GNUTYPE_DUMPDIR` (`D`) with body `Yname\\0` / `Dname\\0` / `Nname\\0` + final NUL. Extract with `-G`: create dir, purge entries not in dumpdir (or type-mismatched). Without `-G`, dumpdir archives still extract files normally. |
+| G1.5 | `-g` / `--listed-incremental` + `--level` | ✅ | Snapshot remains `MUTAR_SNAPSHOT_V2` (`name\\tmtime\\tdev`). Level≥1 skips **unchanged non-directories** (regular files, symlinks, specials) by mtime + optional device; **directories always dumped** (matches GNU). `-g` also emits dumpdir directory members like GNU. |
+
+**GNU interop:** system `tar -tf` lists mutar `-G` archives. Full GNU `-G` extract purge interop not claimed as a hard gate; mutar↔mutar dumpdir round-trip + purge tested.
+
+**Not claimed:** mid-file multi-volume, rmt lseek, full GNU binary snapshot format for `-g` (mutar keeps MUTAR_SNAPSHOT_V2).
+
+**Tests:** `tests/test_phase2_3_parity.sh` (CTest `mutar_phase2_3_parity_tests`).
 **Build:** Debug + ASan + UBSan.

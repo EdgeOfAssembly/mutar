@@ -242,6 +242,13 @@ add_test(
   WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
 )
 
+# GOAL_GNU_PARITY Phases 2–3: exclude-ignore, listed-incremental skip, -G dumpdir
+add_test(
+  NAME mutar_phase2_3_parity_tests
+  COMMAND bash ${CMAKE_SOURCE_DIR}/tests/test_phase2_3_parity.sh $<TARGET_FILE:mutar>
+  WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+)
+
 # Phase F G17: index/seek micro-benchmark smoke (always passes; not a fail gate)
 # Full numbers: BENCH_MEMBERS=2000 bash tests/bench_index_seek.sh build/mutar
 add_test(
