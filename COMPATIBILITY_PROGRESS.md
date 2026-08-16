@@ -815,3 +815,18 @@ Phase 8 parity re-audit (`$TMPDIR/grok-$(id -u)/mutar/parity/phase8-parity-repor
 
 **Parity line:** **YES** except SELinux; listed-incremental write remains intentional `MUTAR_SNAPSHOT_V2`.
 
+---
+
+## Hunt fixes (crash / hang / empty-create / compressor / hardlink)
+
+| ID | Issue | Status | Notes |
+|----|--------|--------|-------|
+| F1 | `read_data_string` on L/K/x/g size −1 / `INT64_MAX` | ✅ | Cap metadata at 16 MiB; reject before `resize`; no uncaught throw |
+| F2 | `skip_entry` loops on huge size + short file | ✅ | Stop on EOF/short read; overflow-safe block count; treat as error |
+| CLI-1 | `mutar -c` with no members archives CWD | ✅ | GNU: refuse before `O_TRUNC` (“Cowardly refusing…”); empty `-T` still writes EOF |
+| F4 | gzip/xz child failure ignored (`waitpid` discarded) | ✅ | `ArchiveStream::close` records child status; create/list/extract fail |
+| E2 | extract regular `O_TRUNC` through existing hardlink | ✅ | `nlink>1` (and other non-dirs) unlinked before `O_NOFOLLOW` create |
+| E1 | `link()` follows dest dir symlink (escape) | ✅ | `linkat` + `openat(O_NOFOLLOW)` walk for target and name |
+
+**Tests:** `tests/test_hunt_fixes.sh` (CTest `mutar_hunt_fixes_tests`).
+

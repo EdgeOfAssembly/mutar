@@ -894,6 +894,11 @@ public:
         }
         // Close source (waits for decompressor child if any)
         src.close();
+        if (src.child_failed()) {
+            ::close(tfd);
+            ::unlink(tmpl);
+            return std::unexpected(msg_error(src.child_error()));
+        }
         if (::lseek(tfd, 0, SEEK_SET) < 0) {
             int e = errno;
             ::close(tfd);
@@ -935,9 +940,13 @@ public:
           temp_unlink_(std::move(o.temp_unlink_)),
           remote_upload_(std::move(o.remote_upload_)),
           rsh_command_(std::move(o.rsh_command_)),
-          rmt_command_(std::move(o.rmt_command_)) {
+          rmt_command_(std::move(o.rmt_command_)),
+          child_failed_(o.child_failed_),
+          child_status_(o.child_status_),
+          child_error_(std::move(o.child_error_)) {
         o.fd_ = -1; o.owns_fd_ = false; o.child_pid_ = -1;
         o.patch_fd_ = -1; o.patch_mtime_ = 0;
+        o.child_failed_ = false; o.child_status_ = 0; o.child_error_.clear();
     }
     ArchiveStream& operator=(ArchiveStream&& o) noexcept {
         if (this != &o) {
@@ -949,8 +958,12 @@ public:
             remote_upload_ = std::move(o.remote_upload_);
             rsh_command_ = std::move(o.rsh_command_);
             rmt_command_ = std::move(o.rmt_command_);
+            child_failed_ = o.child_failed_;
+            child_status_ = o.child_status_;
+            child_error_ = std::move(o.child_error_);
             o.fd_ = -1; o.owns_fd_ = false; o.child_pid_ = -1;
             o.patch_fd_ = -1; o.patch_mtime_ = 0;
+            o.child_failed_ = false; o.child_status_ = 0; o.child_error_.clear();
         }
         return *this;
     }
@@ -975,13 +988,30 @@ public:
         if (owns_fd_ && fd_ >= 0) { ::close(fd_); fd_ = -1; owns_fd_ = false; }
         if (child_pid_ > 0) {
             int st = 0;
-            ::waitpid(child_pid_, &st, 0);
+            if (::waitpid(child_pid_, &st, 0) < 0) {
+                child_failed_ = true;
+                child_error_ = std::format("waitpid: {}", std::strerror(errno));
+            } else {
+                child_status_ = st;
+                if (!(WIFEXITED(st) && WEXITSTATUS(st) == 0)) {
+                    child_failed_ = true;
+                    if (WIFEXITED(st))
+                        child_error_ = std::format(
+                            "child process exited with status {}", WEXITSTATUS(st));
+                    else if (WIFSIGNALED(st))
+                        child_error_ = std::format(
+                            "child process killed by signal {}", WTERMSIG(st));
+                    else
+                        child_error_ = "child process failed";
+                }
+            }
             child_pid_ = -1;
             // After compressor finishes, patch gzip mtime header (bytes 4-7, LE uint32).
             // Only patch when the compressor exited successfully to avoid writing
             // into a corrupt/partial stream.
             if (patch_fd_ >= 0) {
-                bool compressor_ok = WIFEXITED(st) && WEXITSTATUS(st) == 0;
+                bool compressor_ok = !child_failed_ &&
+                    WIFEXITED(st) && WEXITSTATUS(st) == 0;
                 if (compressor_ok && patch_mtime_ != 0) {
                     auto t = static_cast<std::uint32_t>(patch_mtime_);
                     unsigned char mb[4] = {
@@ -1029,6 +1059,10 @@ public:
     }
 
     int fd() const noexcept { return fd_; }
+
+    /// True when a compressor/decompressor child exited non-zero (after close()).
+    [[nodiscard]] bool child_failed() const noexcept { return child_failed_; }
+    [[nodiscard]] const std::string& child_error() const noexcept { return child_error_; }
 
     // Full-buffer reads (for block-aligned I/O)
     ssize_t read_buf(void* buf, std::size_t n) {
@@ -1090,6 +1124,9 @@ private:
     std::string remote_upload_;  // host:path to upload temp_unlink_ on close
     std::string rsh_command_;
     std::string rmt_command_;
+    bool        child_failed_ = false;
+    int         child_status_ = 0;
+    std::string child_error_;
 };
 
 // ── Block buffer (blocking-factor–aligned I/O) ───────────────────────────────
@@ -1119,7 +1156,13 @@ public:
             if (!fill(s)) { eof_ = true; return false; }
         }
         // Ensure a full block is available; treat sub-block tail as EOF.
-        if (pos_ + BLOCKSIZE > used_) { eof_ = true; return false; }
+        // Advance pos_ so a subsequent call hits fill() instead of spinning
+        // on the same short tail (skip_entry used to loop forever this way).
+        if (pos_ + BLOCKSIZE > used_) {
+            eof_ = true;
+            pos_ = used_;
+            return false;
+        }
         std::memcpy(blk.buffer, buf_.data() + pos_, BLOCKSIZE);
         pos_ += BLOCKSIZE;
         block_no_++;
@@ -2215,7 +2258,9 @@ public:
 
             // GNU LongName / LongLink
             if (e.typeflag == GNUTYPE_LONGNAME || e.typeflag == GNUTYPE_LONGLINK) {
-                std::string longstr = read_data_string(e.size);
+                std::string longstr;
+                if (!read_data_string(e.size, longstr))
+                    return {{}, false, true};
                 // Strip trailing NUL
                 while (!longstr.empty() && longstr.back() == '\0') longstr.pop_back();
                 if (e.typeflag == GNUTYPE_LONGNAME) pending_longname = std::move(longstr);
@@ -2225,7 +2270,9 @@ public:
 
             // PAX extended / global headers
             if (e.typeflag == XHDTYPE || e.typeflag == XGLTYPE) {
-                std::string pax_data = read_data_string(e.size);
+                std::string pax_data;
+                if (!read_data_string(e.size, pax_data))
+                    return {{}, false, true};
                 auto parsed = pax_parse_filtered(pax_data);
                 if (e.typeflag == XGLTYPE) {
                     // Global header replaces prior archive-global map (GNU).
@@ -2253,28 +2300,76 @@ public:
         }
     }
 
-    // Skip over the data blocks for the current entry
-    void skip_entry(const Entry& e) {
+    /// True after a fatal read error (bad size, unexpected EOF, etc.).
+    [[nodiscard]] bool failed() const noexcept { return failed_; }
+
+    // Skip over the data blocks for the current entry.
+    // Stops on EOF / short read (never spins on a huge claimed size).
+    bool skip_entry(const Entry& e) {
+        if (failed_)
+            return false;
         std::int64_t to_skip = e.asize;
-        std::int64_t blocks  = (to_skip + BLOCKSIZE - 1) / BLOCKSIZE;
+        if (to_skip < 0) {
+            print(stderr, "mutar: invalid member size {}\n", to_skip);
+            failed_ = true;
+            return false;
+        }
+        if (to_skip == 0)
+            return true;
         Block dummy{};
-        for (std::int64_t i = 0; i < blocks; ++i)
-            buf_.read_block(*stream_, dummy);
+        const std::int64_t max_pad = std::numeric_limits<std::int64_t>::max()
+            - static_cast<std::int64_t>(BLOCKSIZE - 1);
+        if (to_skip > max_pad) {
+            while (buf_.read_block(*stream_, dummy)) {}
+            print(stderr, "mutar: unexpected EOF in archive\n");
+            failed_ = true;
+            return false;
+        }
+        std::int64_t blocks = (to_skip + BLOCKSIZE - 1) / BLOCKSIZE;
+        for (std::int64_t i = 0; i < blocks; ++i) {
+            if (!buf_.read_block(*stream_, dummy)) {
+                print(stderr, "mutar: unexpected EOF in archive\n");
+                failed_ = true;
+                return false;
+            }
+        }
+        return true;
     }
 
-    // Read entry data into a string (used for LongName, PAX headers)
-    std::string read_data_string(std::int64_t sz) {
-        std::string result;
-        result.resize(static_cast<std::size_t>(sz));
+    // Read entry data into a string (used for LongName, PAX headers, dumpdir).
+    // Rejects negative / oversized claims before any allocation.
+    bool read_data_string(std::int64_t sz, std::string& out) {
+        out.clear();
+        if (failed_)
+            return false;
+        if (sz < 0) {
+            print(stderr, "mutar: invalid member size {}\n", sz);
+            failed_ = true;
+            return false;
+        }
+        // Metadata (L/K/x/g/dumpdir) is not a payload file; cap before resize.
+        static constexpr std::int64_t k_max_metadata = 16 * 1024 * 1024;
+        if (sz > k_max_metadata) {
+            print(stderr, "mutar: member size {} exceeds metadata limit ({})\n",
+                  sz, k_max_metadata);
+            failed_ = true;
+            return false;
+        }
+        if (sz == 0)
+            return true;
         std::int64_t blocks = (sz + BLOCKSIZE - 1) / BLOCKSIZE;
         std::string blockbuf(static_cast<std::size_t>(blocks * BLOCKSIZE), '\0');
         Block blk{};
         for (std::int64_t i = 0; i < blocks; ++i) {
-            buf_.read_block(*stream_, blk);
+            if (!buf_.read_block(*stream_, blk)) {
+                print(stderr, "mutar: unexpected EOF in archive\n");
+                failed_ = true;
+                return false;
+            }
             std::memcpy(blockbuf.data() + i * BLOCKSIZE, blk.buffer, BLOCKSIZE);
         }
-        result = blockbuf.substr(0, static_cast<std::size_t>(sz));
-        return result;
+        out.assign(blockbuf.data(), static_cast<std::size_t>(sz));
+        return true;
     }
 
     // Read entry data, writing to fd (or string if fd < 0).
@@ -2509,6 +2604,7 @@ public:
     ArchiveStream* stream_;
     BlockBuffer    buf_;
     bool           ignore_zeros_ = false;
+    bool           failed_ = false;
     const Config*  warn_cfg_ = nullptr;
     const PaxOptionRules* pax_rules_ = nullptr;
     std::map<std::string, std::string> cli_global_pax_;
@@ -3400,15 +3496,29 @@ static int open_extract_regular(const std::string& outpath, const Config& cfg,
     };
 
     struct stat st{};
-    if (::fstatat(dirfd, base.c_str(), &st, AT_SYMLINK_NOFOLLOW) == 0 && S_ISLNK(st.st_mode)) {
+    if (::fstatat(dirfd, base.c_str(), &st, AT_SYMLINK_NOFOLLOW) == 0) {
+        if (S_ISDIR(st.st_mode)) {
+            errno = EISDIR;
+            close_dir();
+            return -1;
+        }
         if (cfg.keep_old_files) {
             errno = EEXIST;
             close_dir();
             return -1;
         }
-        if (::unlinkat(dirfd, base.c_str(), 0) < 0 && errno != ENOENT) {
-            close_dir();
-            return -1;
+        // Never write through a symlink. Never O_TRUNC a hardlinked regular
+        // file (nlink>1 can alias a path outside the extract tree). Other
+        // non-dirs (fifo/sock/dev) are replaced. Multi-volume continuation
+        // (no_trunc) must keep the same inode.
+        const bool unlink_first =
+            S_ISLNK(st.st_mode) ||
+            (!no_trunc && (!S_ISREG(st.st_mode) || st.st_nlink > 1));
+        if (unlink_first) {
+            if (::unlinkat(dirfd, base.c_str(), 0) < 0 && errno != ENOENT) {
+                close_dir();
+                return -1;
+            }
         }
     }
 
@@ -3437,6 +3547,110 @@ static int open_extract_regular(const std::string& outpath, const Config& cfg,
 
     close_dir();
     return fd;
+}
+
+/// Open an existing directory component with O_NOFOLLOW (no mkdir, no replace).
+/// With --keep-directory-symlink, a symlink-to-dir may be followed.
+static int openat_existing_dir_nofollow(int dirfd, const std::string& name,
+                                        const Config& cfg) {
+    int fd = ::openat(dirfd, name.c_str(),
+                      O_RDONLY | O_DIRECTORY | k_extract_nofollow);
+    if (fd >= 0) return fd;
+    if (cfg.keep_dir_symlink && (errno == ELOOP || errno == ENOTDIR))
+        return ::openat(dirfd, name.c_str(), O_RDONLY | O_DIRECTORY);
+    return -1;
+}
+
+/// Walk parent components of an existing path without following dir symlinks
+/// and without creating missing directories. Used for hardlink targets.
+static int walk_existing_parent_nofollow(const std::string& path, const Config& cfg,
+                                         int* out_dirfd, std::string* out_base) {
+    bool abs = false;
+    auto parts = split_extract_components(path, &abs);
+    if (parts.empty()) {
+        *out_base = ".";
+        if (abs) {
+            int rootfd = ::open("/", O_RDONLY | O_DIRECTORY);
+            if (rootfd < 0) return -1;
+            *out_dirfd = rootfd;
+            return 0;
+        }
+        *out_dirfd = AT_FDCWD;
+        return 0;
+    }
+    *out_base = parts.back();
+
+    int dirfd = AT_FDCWD;
+    std::vector<int> owned;
+    auto fail = [&]() {
+        for (int fd : owned) ::close(fd);
+        return -1;
+    };
+    auto adopt = [&](int fd) {
+        if (fd != AT_FDCWD) owned.push_back(fd);
+        dirfd = fd;
+    };
+
+    if (abs) {
+        int rootfd = ::open("/", O_RDONLY | O_DIRECTORY);
+        if (rootfd < 0) return -1;
+        adopt(rootfd);
+    }
+
+    for (std::size_t i = 0; i + 1 < parts.size(); ++i) {
+        int next = openat_existing_dir_nofollow(dirfd, parts[i], cfg);
+        if (next < 0) return fail();
+        for (int fd : owned) ::close(fd);
+        owned.clear();
+        adopt(next);
+    }
+
+    *out_dirfd = dirfd;
+    owned.clear();
+    return 0;
+}
+
+/// Create a hard link using openat/O_NOFOLLOW walks for both names so a
+/// directory symlink in the extract tree cannot redirect the link outside.
+static int extract_hardlink(const std::string& outpath, const std::string& target,
+                            const Config& cfg) {
+    int tdir = AT_FDCWD;
+    std::string tbase;
+    if (walk_existing_parent_nofollow(target, cfg, &tdir, &tbase) < 0)
+        return -1;
+
+    int ddir = AT_FDCWD;
+    std::string dbase;
+    if (walk_extract_parent(outpath, cfg, &ddir, &dbase) < 0) {
+        if (tdir != AT_FDCWD) ::close(tdir);
+        return -1;
+    }
+
+    auto cleanup = [&]() {
+        if (tdir != AT_FDCWD) ::close(tdir);
+        if (ddir != AT_FDCWD) ::close(ddir);
+    };
+
+    if (cfg.keep_old_files) {
+        struct stat st{};
+        if (::fstatat(ddir, dbase.c_str(), &st, AT_SYMLINK_NOFOLLOW) == 0) {
+            errno = EEXIST;
+            cleanup();
+            return -1;
+        }
+    } else if (::unlinkat(ddir, dbase.c_str(), 0) < 0 && errno != ENOENT) {
+        cleanup();
+        return -1;
+    }
+
+    int rc = ::linkat(tdir, tbase.c_str(), ddir, dbase.c_str(), 0);
+    int saved = errno;
+    cleanup();
+    if (rc < 0) {
+        errno = saved;
+        return -1;
+    }
+    return 0;
 }
 
 /// RAII unlink of a temp path (materialized seek view).
@@ -4642,10 +4856,12 @@ static int op_list(const Config& cfg) {
     std::int64_t checkpoint_count = 0;
     std::map<std::string, int> occurrence_map;
     bool started = cfg.starting_file.empty();
+    int exit_code = EXIT_SUCCESS;
     for (;;) {
         auto [e, ok, eof] = reader.next_entry();
         if (eof) break;
-        if (!ok) return EXIT_FAILURE;
+        if (!ok) { exit_code = EXIT_FAILURE; break; }
+        if (reader.failed()) { exit_code = EXIT_FAILURE; break; }
         if (cfg.checkpoint > 0 && ++checkpoint_count % cfg.checkpoint == 0)
             do_checkpoint(cfg, checkpoint_count);
         if (!started) {
@@ -4701,17 +4917,35 @@ static int op_list(const Config& cfg) {
 
         total_bytes += (e.asize + BLOCKSIZE - 1) / BLOCKSIZE * BLOCKSIZE;
         add_running_total((e.asize + BLOCKSIZE - 1) / BLOCKSIZE * BLOCKSIZE);
-        reader.skip_entry(e);
+        if (!reader.skip_entry(e)) {
+            exit_code = EXIT_FAILURE;
+            break;
+        }
     }
     if (cfg.totals)
         print(stderr, "Total bytes listed: {}\n", total_bytes);
     if (g_index_fp) { std::fclose(g_index_fp); g_index_fp = nullptr; }
-    return EXIT_SUCCESS;
+    if (reader.failed())
+        exit_code = EXIT_FAILURE;
+    s.close();
+    if (s.child_failed()) {
+        print(stderr, "mutar: {}\n", s.child_error());
+        exit_code = EXIT_FAILURE;
+    }
+    return exit_code;
 }
 
 // ── create (-c) ───────────────────────────────────────────────────────────────
 
 static int op_create(const Config& cfg) {
+    // GNU tar: no member names and no -T → refuse (do not archive CWD, and
+    // do not O_TRUNC an existing archive path).
+    if (cfg.files.empty() && cfg.files_from.empty()) {
+        print(stderr, "mutar: Cowardly refusing to create an empty archive\n");
+        print(stderr, "Try 'mutar --help' for more information.\n");
+        return EXIT_FAILURE;
+    }
+
     // Multi-volume: starting volume number from --volno-file (default 1)
     int vol_num = 1;
     if (cfg.multi_volume && !cfg.volno_file.empty())
@@ -4856,6 +5090,11 @@ static int op_create(const Config& cfg) {
         total_bytes += writer.block_no() * static_cast<std::int64_t>(BLOCKSIZE);
         std::string finished_path = vol_cfg.archive_file;
         s.close();
+        if (s.child_failed()) {
+            print(stderr, "mutar: {}\n", s.child_error());
+            exit_code = EXIT_FAILURE;
+            return false;
+        }
 
         if (!run_info_script(cfg, finished_path, vol_num, "-c")) {
             exit_code = EXIT_FAILURE;
@@ -5069,7 +5308,7 @@ static int op_create(const Config& cfg) {
             exit_code = EXIT_FAILURE;
     };
     if (cfg.files.empty()) {
-        note_walk_fail(walk_dir("", ".", cfg, add_file));
+        // -T / --files-from was given but produced no names: empty archive.
     } else {
         for (const auto& f : cfg.files)
             note_walk_fail(walk_dir("", f, cfg, add_file));
@@ -5079,6 +5318,10 @@ static int op_create(const Config& cfg) {
     total_bytes += writer.block_no() * static_cast<std::int64_t>(BLOCKSIZE);
     set_running_total(total_bytes);
     s.close();
+    if (s.child_failed()) {
+        print(stderr, "mutar: {}\n", s.child_error());
+        exit_code = EXIT_FAILURE;
+    }
 
     if (cfg.multi_volume && !cfg.volno_file.empty()) {
         if (!write_volno_file(cfg.volno_file, vol_num))
@@ -5182,9 +5425,14 @@ static int op_create(const Config& cfg) {
                 if (veof) break;
                 if (!vok) { verify_ok = false; break; }
                 ++verify_count;
-                vreader.skip_entry(ve);
+                if (!vreader.skip_entry(ve)) {
+                    verify_ok = false;
+                    break;
+                }
             }
             vs.close();
+            if (vreader.failed() || vs.child_failed())
+                verify_ok = false;
             if (verify_ok)
                 print(stderr, "mutar: Verify OK ({} entries)\n", verify_count);
             else
@@ -5376,6 +5624,10 @@ static int op_extract(const Config& cfg) {
         print(stderr, "mutar: reading volume #{} from {}\n",
               extract_vol_num, next_vol);
         s.close();
+        if (s.child_failed()) {
+            print(stderr, "mutar: {}\n", s.child_error());
+            return false;
+        }
         s = std::move(*next_res);
         reader.swap_stream(s);
         return true;
@@ -5420,6 +5672,10 @@ static int op_extract(const Config& cfg) {
 
         auto [e, ok, eof] = reader.next_entry();
         if (eof) {
+            if (reader.failed()) {
+                exit_code = EXIT_FAILURE;
+                break;
+            }
             if (use_index_seek) break; // done with seek queue
             // Multi-volume: on EOF, try next volume; absence is a clean end.
             if (cfg.multi_volume) {
@@ -5595,7 +5851,6 @@ static int op_extract(const Config& cfg) {
         }
         case LNKTYPE:
         {
-            ::unlink(outpath.c_str());
             std::string link_target = sanitize_path(e.linkname, cfg.absolute_names);
             // Apply the same path rewrites as for outpath so the hard link target
             // remains consistent when --transform / --strip-components / --one-top-level
@@ -5606,12 +5861,13 @@ static int op_extract(const Config& cfg) {
                 link_target = strip_components(link_target, cfg.strip_components);
             if (!one_top.empty() && link_target != "." && link_target != "./")
                 link_target = one_top + "/" + link_target;
-            if (::link(link_target.c_str(), outpath.c_str()) < 0) {
+            if (extract_hardlink(outpath, link_target, cfg) < 0) {
                 print(stderr, "mutar: hardlink {} -> {}: {}\n",
                            outpath, link_target, std::strerror(errno));
                 exit_code = EXIT_FAILURE;
             }
-            reader.skip_entry(e);
+            if (!reader.skip_entry(e))
+                exit_code = EXIT_FAILURE;
             break;
         }
         case CHRTYPE:
@@ -5656,11 +5912,16 @@ static int op_extract(const Config& cfg) {
                     struct stat tgt_st{};
                     if (::stat(dpath.c_str(), &tgt_st) == 0 && S_ISDIR(tgt_st.st_mode)) {
                         if (cfg.incremental && e.size > 0) {
-                            std::string body = reader.read_data_string(e.size);
+                            std::string body;
+                            if (!reader.read_data_string(e.size, body)) {
+                                exit_code = EXIT_FAILURE;
+                                break;
+                            }
                             auto dump = parse_dumpdir(body);
                             purge_directory_dumpdir(dpath, dump, cfg);
                         } else {
-                            reader.skip_entry(e);
+                            if (!reader.skip_entry(e))
+                                exit_code = EXIT_FAILURE;
                         }
                         if (cfg.delay_dir_restore && !cfg.no_delay_dir_restore)
                             dir_fixups.push_back({dpath, e.mtime, e.mtime_nsec, e.mode});
@@ -5683,7 +5944,11 @@ static int op_extract(const Config& cfg) {
 
             // Read dumpdir body then purge extras when -G/--incremental
             if (e.size > 0) {
-                std::string body = reader.read_data_string(e.size);
+                std::string body;
+                if (!reader.read_data_string(e.size, body)) {
+                    exit_code = EXIT_FAILURE;
+                    break;
+                }
                 if (cfg.incremental) {
                     auto dump = parse_dumpdir(body);
                     purge_directory_dumpdir(dpath, dump, cfg);
@@ -6059,6 +6324,14 @@ static int op_extract(const Config& cfg) {
 
     if (g_index_fp) { std::fclose(g_index_fp); g_index_fp = nullptr; }
 
+    if (reader.failed())
+        exit_code = EXIT_FAILURE;
+    s.close();
+    if (s.child_failed()) {
+        print(stderr, "mutar: {}\n", s.child_error());
+        exit_code = EXIT_FAILURE;
+    }
+
     // materialize_guard destructor unlinks temp if armed
     return exit_code;
 }
@@ -6114,7 +6387,17 @@ static int op_diff(const Config& cfg) {
                 exit_code = EXIT_FAILURE;
             }
         }
-        reader.skip_entry(e);
+        if (!reader.skip_entry(e)) {
+            exit_code = EXIT_FAILURE;
+            break;
+        }
+    }
+    if (reader.failed())
+        exit_code = EXIT_FAILURE;
+    s.close();
+    if (s.child_failed()) {
+        print(stderr, "mutar: {}\n", s.child_error());
+        exit_code = EXIT_FAILURE;
     }
     return exit_code;
 }

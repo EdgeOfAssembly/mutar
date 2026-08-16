@@ -221,6 +221,14 @@ add_test(
   WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
 )
 
+# Hunt-bug regressions: huge L/K size crash, skip_entry hang, empty create, compressor rc
+add_test(
+  NAME mutar_hunt_fixes_tests
+  COMMAND bash ${CMAKE_SOURCE_DIR}/tests/test_hunt_fixes.sh $<TARGET_FILE:mutar>
+  WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+)
+set_tests_properties(mutar_hunt_fixes_tests PROPERTIES TIMEOUT 30)
+
 # xattrs + ACLs store/restore via SCHILY PAX (GOAL_NEXT Phase D / G6–G8)
 add_test(
   NAME mutar_xattrs_acls_tests
