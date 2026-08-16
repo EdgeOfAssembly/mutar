@@ -1,6 +1,6 @@
 # µtar (mutar) — Master Goal Prompt
 
-**Status:** ready to execute  
+**Status:** phases 0–7 complete (2026-08-16)  
 **Date:** 2026-08-16  
 **Owner:** EdgeOfAssembly  
 **Local tree:** `/tmp/Star`  
@@ -359,7 +359,9 @@ bash tests/test_formats_compression.sh "$BIN"
 bash tests/test_sparse.sh "$BIN"
 bash tests/test_new_options.sh "$BIN"
 bash tests/test_pr172_features.sh "$BIN"
-# later: bash tests/test_index_seek.sh "$BIN"
+bash tests/test_index_seek.sh "$BIN"
+bash tests/test_seekable_compress.sh "$BIN"
+# optional: BENCH_MEMBERS=2000 bash tests/bench_index_seek.sh "$BIN"
 ```
 
 **Evidence rule:** no “green” claim without command + exit code 0 in the report.
@@ -429,14 +431,14 @@ Report after each phase: what changed, commands+exit codes, residual risks.
 
 ## 11. Success metrics (checklist)
 
-- [ ] `https://github.com/EdgeOfAssembly/mutar` exists (renamed)
-- [ ] `mutar --version` and `mutar --help` work; Schily disclaimer present
-- [ ] Zero product-name confusion with Schily `star` in README title
-- [ ] ASan+UBSan ctest + shell suites exit 0
-- [ ] SELinux documented as unsupported; not claimed in feature tables
-- [ ] Compatibility language is “~99%”, not “100%”
-- [ ] (Later) Sidecar index + seek path tested
-- [ ] All FEATURE/FIXUP commits pushed to origin
+- [x] `https://github.com/EdgeOfAssembly/mutar` exists (renamed)
+- [x] `mutar --version` and `mutar --help` work; Schily disclaimer present
+- [x] Zero product-name confusion with Schily `star` in README title
+- [x] ASan+UBSan ctest + shell suites exit 0
+- [x] SELinux documented as unsupported; not claimed in feature tables
+- [x] Compatibility language is “~99%”, not “100%”
+- [x] Sidecar index + seek path tested (Phases 5–6)
+- [x] All FEATURE/FIXUP commits pushed to origin
 
 ---
 

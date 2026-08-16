@@ -282,7 +282,7 @@ run_cross_mutar_to_systtar() {
   mkdir -p "$W"
   local ARCHIVE="$W/test${ext}"
 
-  # star creates
+  # mutar creates
   local create_flags=(-c -H "$fmt")
   [ "$cflag" != "none" ] && create_flags+=("$cflag")
   create_flags+=(-f "$ARCHIVE" -C "$GROUND" .)
@@ -446,7 +446,7 @@ for archive in "${REPO_ARCHIVES[@]}"; do
 
   # Repack with mutar into a separate location (not inside src)
   if ! timeout 30 "$MUTAR" -czf "$W/repack.tar.gz" -C "$W/src" . 2>/dev/null; then
-    fail "repo:$base" "star repack failed"
+    fail "repo:$base" "mutar repack failed"
     continue
   fi
 

@@ -6,10 +6,24 @@ It is **not** Jörg Schilling’s `star` (Schily tools).
 
 **Compatibility goal: ~99% with GNU tar 1.35** for common formats
 (v7, oldgnu, gnu, ustar, pax/posix) and the command-line interface in `tar(1)`.
-**SELinux is not supported** (no test hardware). Optional **sidecar index** (`--write-index` / `--mutar-index`) enables fast list and seek extract on uncompressed archives. Run `./mutar --help` for options.
+**SELinux is not supported** (no test hardware). Optional **sidecar index** (`--write-index` / `--mutar-index`) and **`--seekable`** enable fast list and seek extract (uncompressed direct seek; compressed materialize-then-seek). Run `./mutar --help` for options.
 
 > See `COMPATIBILITY_PROGRESS.md` for an option-by-option audit and
 > `ARCHITECTURE.md` for design details. Campaign plan: `GOAL.md`.
+
+## Status
+
+**v0.1.0 freeze (2026-08-16).** Campaign `GOAL.md` phases 0–7 complete.
+
+| Area | Status |
+|------|--------|
+| Identity | µtar / `mutar` / [EdgeOfAssembly/mutar](https://github.com/EdgeOfAssembly/mutar) |
+| GNU tar interop | Formats + common CLI; **~99%** goal |
+| SELinux | Unsupported |
+| Sidecar index | `--write-index` / `--mutar-index` |
+| Seek | Uncompressed direct; compressed materialize-then-seek (`--seekable`) |
+
+Proof log: `PROGRESS.md`. Option audit: `COMPATIBILITY_PROGRESS.md`.
 
 ---
 
@@ -303,8 +317,8 @@ bash tests/test_new_options.sh build/mutar
 | T03 | Verbose listing format |
 | T04 | Symlink preservation |
 | T05–T07 | gzip / bzip2 / xz round-trip |
-| T08 | Interop: star reads system-tar archive |
-| T09 | Interop: system tar reads star archive |
+| T08 | Interop: mutar reads system-tar archive |
+| T09 | Interop: system tar reads mutar archive |
 | T10 | Long filename (GNU LongName extension) |
 | T11 | USTAR format + magic byte check |
 | T12 | PAX format (extended headers) |

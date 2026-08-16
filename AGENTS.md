@@ -116,7 +116,7 @@ Every PR that touches option parsing must update `print_usage()` in `src/mutar.c
 
 ## Documentation Update Checklist
 
-For any PR changing star/ behavior:
+For any PR changing mutar behavior:
 
 - [ ] `src/mutar.cpp` — update `print_usage()` if options added/changed
 - [ ] `README.md` — update feature status table
@@ -142,7 +142,7 @@ See `/.github/instructions/star.instructions.md` section 5 for the full list. Su
 
 ---
 
-## Security Rules for star/
+## Security Rules for mutar
 
 - Temporary work directories: use `mkdtemp()`, not `/tmp/mutar_fixed_name`.
 - Archive extraction paths: validate that extracted paths do not escape the destination

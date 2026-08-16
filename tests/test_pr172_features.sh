@@ -165,7 +165,7 @@ echo "[T-ODIR-01]"
     "$MUTAR" -c -f "$D/arch.tar" --format=ustar -C "$D" src/ 2>/dev/null || true
 
     # Pre-create the extract directory structure BEFORE extraction
-    # so that the dirs already exist when star tries to extract them
+    # so that the dirs already exist when mutar tries to extract them
     mkdir -p "$EXT/src/testdir"
 
     # Extract with --no-overwrite-dir; archived year-2000 mtime must NOT be applied

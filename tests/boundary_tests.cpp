@@ -423,7 +423,7 @@ static void test_sanitize_path_traversal() {
     char outdir[] = "/tmp/mutar_bt_trav_XXXXXX";
     assert(::mkdtemp(outdir) != nullptr);
 
-    // star should extract, but NOT to ../../evil.txt outside outdir
+    // mutar should extract, but NOT to ../../evil.txt outside outdir
     run_star({"-xf", archive, "-C", outdir});
 
     // Check: the evil file must NOT have appeared in parent of outdir

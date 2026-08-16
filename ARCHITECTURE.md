@@ -272,9 +272,9 @@ during create/extract/list. The `cfg.checkpoint_action` field selects output:
 
 | Action | Behaviour |
 |--------|-----------|
-| *(empty)* | Prints `star: checkpoint N` to stderr (default) |
+| *(empty)* | Prints `mutar: checkpoint N` to stderr (default) |
 | `dot` or `.` | Prints `.` to stderr with no newline |
-| `echo MESSAGE` | Prints `star: MESSAGE` to stderr |
+| `echo MESSAGE` | Prints `mutar: MESSAGE` to stderr |
 | `ttyout=FORMAT` | Writes FORMAT to `/dev/tty` |
 
 #### `g_index_fp` global mechanism

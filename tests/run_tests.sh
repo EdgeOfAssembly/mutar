@@ -163,7 +163,7 @@ test_xz() {
     return 0
 }
 
-# ── T08: star reads tar-written archive ───────────────────────────────────────
+# ── T08: mutar reads tar-written archive ───────────────────────────────────────
 test_interop_read() {
     require_cmd tar T08 || return 0
     local W; W="$(mkwork T08)"
@@ -175,7 +175,7 @@ test_interop_read() {
     # Read with mutar
     local listing
     listing="$("$MUTAR" -tf "$W/gnu.tar")"
-    echo "$listing" | grep -q "file1.txt" || { echo "star can't read tar archive"; return 1; }
+    echo "$listing" | grep -q "file1.txt" || { echo "mutar can't read tar archive"; return 1; }
 
     mkdir -p "$W/output"
     "$MUTAR" -xf "$W/gnu.tar" -C "$W/output"
@@ -183,7 +183,7 @@ test_interop_read() {
     return 0
 }
 
-# ── T09: tar reads star-written archive ───────────────────────────────────────
+# ── T09: tar reads mutar-written archive ───────────────────────────────────────
 test_interop_write() {
     require_cmd tar T09 || return 0
     local W; W="$(mkwork T09)"
@@ -195,7 +195,7 @@ test_interop_write() {
     # Read with system tar
     local listing
     listing="$("$TAR" -tf "$W/star.tar" 2>&1)"
-    echo "$listing" | grep -q "file1.txt" || { echo "tar can't read star archive"; return 1; }
+    echo "$listing" | grep -q "file1.txt" || { echo "tar can't read mutar archive"; return 1; }
     return 0
 }
 
@@ -781,7 +781,7 @@ echo " mutar (µtar) test suite"
 echo " mutar binary: $MUTAR"
 echo "======================================="
 
-[[ -x "$MUTAR" ]] || { echo "FATAL: star binary not found or not executable: $MUTAR"; exit 1; }
+[[ -x "$MUTAR" ]] || { echo "FATAL: mutar binary not found or not executable: $MUTAR"; exit 1; }
 
 run_test "T01 create+list"             test_create_list
 run_test "T02 create+extract"          test_create_extract

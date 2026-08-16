@@ -275,7 +275,7 @@ Three flags are now honoured by `is_excluded(path, cfg)`:
 ### 5. `--show-omitted-dirs` wired into create and list
 
 During the `walk_dir()` recursive descent (create), when a directory is
-excluded by any `is_excluded()` test, a `"star: <dir>/"` message is printed
+excluded by any `is_excluded()` test, a `"mutar: <dir>/"` message is printed
 to stderr when `cfg.show_omitted_dirs` is set.
 
 During `op_list()`, when a directory entry doesn't match the requested members
@@ -298,9 +298,9 @@ was stored but the pointer was never opened, and output went only to stdout.
 
 A `do_checkpoint(cfg, n)` function is called every `cfg.checkpoint` processed
 entries. The `cfg.checkpoint_action` value selects output:
-- *(empty)* → `"star: checkpoint N\n"` to stderr (default behavior)
+- *(empty)* → `"mutar: checkpoint N\n"` to stderr (default behavior)
 - `dot` or `.` → `.` to stderr (no newline)
-- `echo MESSAGE` → `"star: MESSAGE\n"` to stderr
+- `echo MESSAGE` → `"mutar: MESSAGE\n"` to stderr
 - `ttyout=FORMAT` → writes FORMAT to `/dev/tty`
 
 ### 9. `--full-time` nanosecond timestamps
@@ -357,7 +357,7 @@ All results measured in the CI environment described in the Environment section.
 
 ```
 ctest --output-on-failure
-Test project …/star/build
+Test project …/mutar/build
     Start 1: mutar_tests          Passed
     Start 2: mutar_shell_tests    Passed
 2/2 tests passed
@@ -540,7 +540,7 @@ binary as their first argument. They do not require `root`; they use
 `mktemp -d` for isolation and clean up on exit.
 
 ```bash
-# From the star/ directory after building:
+# From the mutar directory after building:
 bash tests/run_tests.sh         build/mutar
 bash tests/test_formats_compression.sh  build/mutar
 bash tests/test_sparse.sh       build/mutar
@@ -574,8 +574,8 @@ bash tests/test_new_options.sh  build/mutar
 ### Interoperability verification
 
 Key interop checks in `run_tests.sh`:
-- **T08**: `star -cf` then `tar -tf` — system tar must list all members
-- **T09**: `tar -cf` then `star -xf` — star must extract system-tar archives
-- **T17**: `star -tJf tar-1.35.tar.xz` — reads a real GNU tar 1.35 archive
+- **T08**: `mutar -cf` then `tar -tf` — system tar must list all members
+- **T09**: `tar -cf` then `mutar -xf` — mutar must extract system-tar archives
+- **T17**: `mutar -tJf tar-1.35.tar.xz` — reads a real GNU tar 1.35 archive
 - **T26/T27**: extract all 7 repo `.tar.*` archives, repack, re-extract,
   compare file counts — catches format-parsing regressions
