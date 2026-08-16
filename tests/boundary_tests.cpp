@@ -838,6 +838,36 @@ static void test_null_terminated_files_from() {
     (void)::system(("rm -rf " + std::string(tmpdir)).c_str());
 }
 
+// ─── 18. extract archive created with trailing "." member ─────────────────────
+// Regression: sanitize_path(".") → "."; walk_extract_parent used to EINVAL and
+// fail the whole extract with "cannot create parent directories".
+
+static void test_extract_dot_member() {
+    char tmpdir[] = "/tmp/mutar_bt_dot_XXXXXX";
+    assert(::mkdtemp(tmpdir) != nullptr);
+    std::string nested = std::string(tmpdir) + "/sub";
+    assert(::mkdir(nested.c_str(), 0755) == 0);
+    {
+        std::string f = nested + "/f.txt";
+        int fd = ::open(f.c_str(), O_CREAT | O_WRONLY, 0644);
+        assert(fd >= 0);
+        (void)::write(fd, "dot", 3);
+        ::close(fd);
+    }
+    std::string archive = std::string(tmpdir) + "/dot.tar";
+    int rc = run_mutar({"-cf", archive, "-C", tmpdir, "."});
+    CHECK_EQ(rc, 0);
+
+    char od[] = "/tmp/mutar_bt_dotout_XXXXXX";
+    assert(::mkdtemp(od) != nullptr);
+    rc = run_mutar({"-xf", archive, "-C", od});
+    CHECK_EQ(rc, 0);
+    CHECK_EQ(::access((std::string(od) + "/sub/f.txt").c_str(), F_OK), 0);
+
+    (void)::system(("rm -rf " + std::string(tmpdir)).c_str());
+    (void)::system(("rm -rf " + std::string(od)).c_str());
+}
+
 // ─── main ─────────────────────────────────────────────────────────────────────
 
 int main() {
@@ -863,6 +893,7 @@ int main() {
     std::cout << "[15] strip_components_extremes\n"; test_strip_components_extremes();
     std::cout << "[16] normalize_member\n";        test_normalize_member();
     std::cout << "[17] null_terminated files_from\n"; test_null_terminated_files_from();
+    std::cout << "[18] extract_dot_member\n";      test_extract_dot_member();
 
     std::cout << "\n===========================================\n";
     std::cout << " PASS=" << g_pass << "  FAIL=" << g_fail << "\n";

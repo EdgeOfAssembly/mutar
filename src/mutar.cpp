@@ -3315,9 +3315,18 @@ static int walk_extract_parent(const std::string& outpath, const Config& cfg,
                                int* out_dirfd, std::string* out_base) {
     bool abs = false;
     auto parts = split_extract_components(outpath, &abs);
+    // sanitize_path returns "." for empty / "." / "./" members; split drops
+    // those components so parts is empty. No parent walk is needed (cwd or /).
     if (parts.empty()) {
-        errno = EINVAL;
-        return -1;
+        *out_base = ".";
+        if (abs) {
+            int rootfd = ::open("/", O_RDONLY | O_DIRECTORY);
+            if (rootfd < 0) return -1;
+            *out_dirfd = rootfd;
+            return 0;
+        }
+        *out_dirfd = AT_FDCWD;
+        return 0;
     }
     *out_base = parts.back();
 
