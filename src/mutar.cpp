@@ -1134,12 +1134,13 @@ private:
 class BlockBuffer {
 public:
     explicit BlockBuffer(int blocking = DEFAULT_BLOCK, bool read_full_records = false) {
-        // Validate before any use — a zero or negative blocking factor would
-        // cause record_size_ to be 0 or wrap, leading to UB in buf_.resize().
-        if (blocking < 1) {
+        // Validate before any use — a zero/negative factor wraps; a huge
+        // factor (e.g. --record-size=16MiB+) ASan-aborts on resize.
+        if (blocking < 1 || blocking > MAX_BLOCKING_FACTOR) {
             std::fprintf(stderr,
-                         "mutar: invalid blocking factor %d (must be >= 1)\n",
-                         blocking);
+                         "mutar: invalid blocking factor %d (must be 1..%d): "
+                         "memory exhausted\n",
+                         blocking, MAX_BLOCKING_FACTOR);
             std::exit(EXIT_FAILURE);
         }
         blocking_          = blocking;
@@ -1378,7 +1379,15 @@ static Entry decode_header(const Block& blk) {
     e.mode     = static_cast<unsigned int>(read_octal({h.mode, 8}));
     e.uid      = static_cast<unsigned int>(read_number({h.uid,  8}));
     e.gid      = static_cast<unsigned int>(read_number({h.gid,  8}));
-    e.size     = static_cast<std::int64_t>(read_number({h.size, 12}));
+    {
+        std::int64_t sz = 0;
+        if (!read_number_i64({h.size, 12}, sz) || sz < 0) {
+            e.size = -1;
+            e.size_invalid = true;
+        } else {
+            e.size = sz;
+        }
+    }
     e.mtime    = static_cast<std::int64_t>(read_number({h.mtime, 12}));
     e.devmajor = static_cast<unsigned int>(read_octal({h.devmajor, 8}));
     e.devminor = static_cast<unsigned int>(read_octal({h.devminor, 8}));
@@ -2078,6 +2087,24 @@ static void mutar_warn(const Config& cfg, std::string_view category, std::string
 
 // ── Multi-volume helpers ──────────────────────────────────────────────────────
 
+/// Resolve a local archive path against the current working directory.
+/// Used so -C chdir (extract) / later volumes do not rewrite relative -f paths.
+static std::string absolutize_local_archive(const Config& cfg) {
+    const std::string& path = cfg.archive_file;
+    if (path.empty() || path == "-")
+        return path;
+    if (is_remote_archive(path, cfg.force_local))
+        return path;
+    std::filesystem::path p(path);
+    if (p.is_absolute())
+        return path;
+    std::error_code ec;
+    auto abs = std::filesystem::absolute(p, ec);
+    if (ec)
+        return path;
+    return abs.lexically_normal().string();
+}
+
 // Generate the archive filename for volume N (1-based).
 // If base contains "%d", substitute the first occurrence with the volume number
 // (GNU tar convention). Never pass the user path to printf-family as a format.
@@ -2255,6 +2282,12 @@ public:
 
             Entry e = decode_header(blk);
             e.block_offset = buf_.block_no() - 1;
+
+            if (e.size_invalid) {
+                print(stderr, "mutar: invalid or overflowing member size\n");
+                failed_ = true;
+                return {{}, false, false};
+            }
 
             // GNU LongName / LongLink
             if (e.typeflag == GNUTYPE_LONGNAME || e.typeflag == GNUTYPE_LONGLINK) {
@@ -3928,7 +3961,13 @@ static bool walk_dir(const std::string& base_dir, const std::string& relpath,
                      std::function<void(const std::string& archname, const std::string& fspath)> cb,
                      dev_t same_dev = static_cast<dev_t>(-1),
                      const std::vector<std::string>& inherited_ignore_pats = {}) {
-    std::string full = base_dir.empty() ? relpath : base_dir + "/" + relpath;
+    std::string full;
+    if (relpath.empty())
+        full = base_dir.empty() ? "." : base_dir;
+    else if (relpath[0] == '/' || base_dir.empty())
+        full = relpath;
+    else
+        full = base_dir + "/" + relpath;
 
     struct stat st{};
     if (::lstat(full.c_str(), &st) < 0) {
@@ -4078,6 +4117,11 @@ static bool walk_dir(const std::string& base_dir, const std::string& relpath,
                 if (!is_kept_tag) continue;
             }
             std::string child = full + "/" + ent;
+            std::string child_rel;
+            if (relpath.empty() || relpath == ".")
+                child_rel = ent;
+            else
+                child_rel = relpath + "/" + ent;
             // --one-file-system: skip entries on a different filesystem
             if (cfg.one_file_system) {
                 struct stat cst{};
@@ -4088,7 +4132,7 @@ static bool walk_dir(const std::string& base_dir, const std::string& relpath,
                     continue;
                 }
             }
-            if (!walk_dir("", child, cfg, cb, this_dev, child_ignore_pats))
+            if (!walk_dir(base_dir, child_rel, cfg, cb, this_dev, child_ignore_pats))
                 walk_ok = false;
         }
         return walk_ok;
@@ -4951,9 +4995,14 @@ static int op_create(const Config& cfg) {
     if (cfg.multi_volume && !cfg.volno_file.empty())
         vol_num = read_volno_file(cfg.volno_file);
 
+    // Pin -f to the original CWD so later volumes are not created under -C.
+    const std::string archive_base = cfg.multi_volume
+        ? absolutize_local_archive(cfg)
+        : cfg.archive_file;
+
     Config vol_cfg = cfg;
     if (cfg.multi_volume)
-        vol_cfg.archive_file = make_volume_name(cfg.archive_file, vol_num);
+        vol_cfg.archive_file = make_volume_name(archive_base, vol_num);
 
     auto res = ArchiveStream::open_write(vol_cfg);
     if (!res) {
@@ -5066,13 +5115,8 @@ static int op_create(const Config& cfg) {
     // Collect entries for snapshot write/update (files + directories + specials)
     std::vector<std::pair<std::string, SnapRec>> snapshot_entries;
 
-    // Change directory if requested
-    if (!cfg.directory.empty()) {
-        if (::chdir(cfg.directory.c_str()) < 0) {
-            print(stderr, "mutar: -C {}: {}\n", cfg.directory, std::strerror(errno));
-            return EXIT_FAILURE;
-        }
-    }
+    // Create does not global-chdir: each member uses file_chdir / -C prefix
+    // so -f volume paths stay in the original CWD.
 
     int exit_code = EXIT_SUCCESS;
     std::int64_t total_bytes = 0;
@@ -5109,7 +5153,7 @@ static int op_create(const Config& cfg) {
             }
         }
 
-        vol_cfg.archive_file = make_volume_name(cfg.archive_file, vol_num);
+        vol_cfg.archive_file = make_volume_name(archive_base, vol_num);
         print(stderr, "mutar: writing volume #{} to {}\n", vol_num, vol_cfg.archive_file);
 
         auto next = ArchiveStream::open_write(vol_cfg);
@@ -5310,8 +5354,12 @@ static int op_create(const Config& cfg) {
     if (cfg.files.empty()) {
         // -T / --files-from was given but produced no names: empty archive.
     } else {
-        for (const auto& f : cfg.files)
-            note_walk_fail(walk_dir("", f, cfg, add_file));
+        for (std::size_t i = 0; i < cfg.files.size(); ++i) {
+            const std::string& use_dir = (i < cfg.file_chdir.size())
+                ? cfg.file_chdir[i]
+                : cfg.directory;
+            note_walk_fail(walk_dir(use_dir, cfg.files[i], cfg, add_file));
+        }
     }
 
     writer.finish();
@@ -5547,6 +5595,11 @@ static int op_extract(const Config& cfg) {
     if (cfg.pax_option_rules.any())
         reader.set_pax_rules(&cfg.pax_option_rules);
 
+    // Pin -f before -C so multi-volume follow-on files stay at original CWD.
+    const std::string extract_archive_base = cfg.multi_volume
+        ? absolutize_local_archive(cfg)
+        : cfg.archive_file;
+
     if (!cfg.directory.empty()) {
         if (::chdir(cfg.directory.c_str()) < 0) {
             print(stderr, "mutar: -C {}: {}\n", cfg.directory, std::strerror(errno));
@@ -5590,14 +5643,14 @@ static int op_extract(const Config& cfg) {
     // Open the next multi-volume archive file and swap the reader stream.
     // Used both at member boundaries (EOF zeros) and mid-file (short data read).
     auto switch_extract_volume = [&]() -> bool {
-        std::string cur_vol = make_volume_name(cfg.archive_file, extract_vol_num);
+        std::string cur_vol = make_volume_name(extract_archive_base, extract_vol_num);
         if (!run_info_script(cfg, cur_vol, extract_vol_num, "-x"))
             return false;
         ++extract_vol_num;
         if (!cfg.volno_file.empty())
             write_volno_file(cfg.volno_file, extract_vol_num);
 
-        std::string next_vol = make_volume_name(cfg.archive_file, extract_vol_num);
+        std::string next_vol = make_volume_name(extract_archive_base, extract_vol_num);
         if (::access(next_vol.c_str(), R_OK) != 0) {
             print(stderr, "mutar: Prepare volume #{} ({}) and press return: ",
                   extract_vol_num, next_vol);
@@ -6562,18 +6615,27 @@ static int op_delete(const Config& cfg) {
                 continue;
             }
 
-            // Re-emit via ArchiveWriter so extensions are regenerated
+            // Re-emit via ArchiveWriter so extensions are regenerated.
+            // Stream payload — never reserve(e.size) (INT64_MAX / 1TiB OOM).
             writer.write_header_only(e, cfg);
-            if (e.size > 0) {
-                std::string databuf;
-                databuf.reserve(static_cast<std::size_t>(e.size));
-                reader.read_entry_data(e, -1, [&](const char* p, std::size_t n) {
-                    std::size_t space = static_cast<std::size_t>(e.size) - databuf.size();
-                    if (space > 0) databuf.append(p, std::min(n, space));
-                });
-                writer.write_data_bytes(databuf.data(), databuf.size());
-            } else {
-                reader.skip_entry(e);
+            if (e.asize > 0) {
+                std::int64_t got = 0;
+                if (!reader.read_entry_data(e, -1,
+                        [&](const char* p, std::size_t n) {
+                            writer.write_data_bytes(p, n);
+                        }, &got) || reader.failed()) {
+                    print(stderr, "mutar: error reading member '{}'\n", e.name);
+                    ::unlink(tmpfile.c_str());
+                    return EXIT_FAILURE;
+                }
+                if (got < e.asize) {
+                    print(stderr, "mutar: unexpected EOF in archive\n");
+                    ::unlink(tmpfile.c_str());
+                    return EXIT_FAILURE;
+                }
+            } else if (!reader.skip_entry(e)) {
+                ::unlink(tmpfile.c_str());
+                return EXIT_FAILURE;
             }
         }
         writer.finish();
@@ -7047,6 +7109,105 @@ static void set_format(Config& cfg, std::string_view name) {
 static void print_usage(const char* prog);   // forward declaration
 static void print_version();                  // forward declaration
 
+static bool short_opt_takes_arg(char c) noexcept {
+    return std::strchr("fCgbLFVHTNKXI", c) != nullptr;
+}
+
+static bool long_opt_takes_separate_arg(std::string_view name) noexcept {
+    for (const option* o = long_opts; o->name; ++o) {
+        if (name == o->name)
+            return o->has_arg == required_argument;
+    }
+    return false;
+}
+
+static std::string join_chdir_path(const std::string& cur, const std::string& next) {
+    if (next.empty())
+        return cur;
+    if (next[0] == '/')
+        return next;
+    if (cur.empty())
+        return next;
+    if (cur.back() == '/')
+        return cur + next;
+    return cur + "/" + next;
+}
+
+/// Walk original argv (pre-getopt permutation) so each -C applies to
+/// following member names. Fills cfg.files and parallel cfg.file_chdir.
+static void collect_names_in_order(const std::vector<std::string>& args, Config& cfg) {
+    std::string cur_dir;
+    auto add_name = [&](std::string name) {
+        if (cfg.unquote)
+            name = unquote_name(name);
+        if (name.empty())
+            return;
+        cfg.files.push_back(std::move(name));
+        cfg.file_chdir.push_back(cur_dir);
+    };
+    auto apply_dir = [&](const std::string& d) {
+        cur_dir = join_chdir_path(cur_dir, d);
+        cfg.directory = cur_dir;
+    };
+
+    for (std::size_t i = 1; i < args.size(); ++i) {
+        const std::string& a = args[i];
+        if (a == "--") {
+            for (++i; i < args.size(); ++i)
+                add_name(args[i]);
+            break;
+        }
+        if (a == "-C" || a == "--directory") {
+            if (i + 1 < args.size())
+                apply_dir(args[++i]);
+            continue;
+        }
+        if (a.starts_with("--directory=")) {
+            apply_dir(a.substr(12));
+            continue;
+        }
+        if (a == "--add-file") {
+            if (i + 1 < args.size())
+                add_name(args[++i]);
+            continue;
+        }
+        if (a.starts_with("--add-file=")) {
+            add_name(a.substr(11));
+            continue;
+        }
+        if (a.starts_with("--") && a.size() > 2) {
+            const auto eq = a.find('=');
+            const std::string_view name = std::string_view(a).substr(
+                2, eq == std::string::npos ? std::string_view::npos : eq - 2);
+            if (eq == std::string::npos && long_opt_takes_separate_arg(name) &&
+                i + 1 < args.size())
+                ++i;
+            continue;
+        }
+        if (a.size() >= 2 && a[0] == '-' && a[1] != '-') {
+            for (std::size_t k = 1; k < a.size(); ++k) {
+                const char c = a[k];
+                if (c == 'C') {
+                    if (k + 1 < a.size())
+                        apply_dir(a.substr(k + 1));
+                    else if (i + 1 < args.size())
+                        apply_dir(args[++i]);
+                    break;
+                }
+                if (short_opt_takes_arg(c)) {
+                    if (k + 1 < a.size())
+                        break; // attached argument
+                    if (i + 1 < args.size())
+                        ++i;
+                    break;
+                }
+            }
+            continue;
+        }
+        add_name(a);
+    }
+}
+
 static Config parse_args(int argc, char* argv[]) {
     Config cfg;
 
@@ -7075,6 +7236,12 @@ static Config parse_args(int argc, char* argv[]) {
             argv[1] = modified.data();
         }
     }
+
+    // Snapshot argv before getopt permutes options ahead of operands.
+    std::vector<std::string> argv_copy;
+    argv_copy.reserve(static_cast<std::size_t>(argc));
+    for (int i = 0; i < argc; ++i)
+        argv_copy.emplace_back(argv[i] ? argv[i] : "");
 
     int opt;
     int long_idx = 0;
@@ -7119,8 +7286,10 @@ static Config parse_args(int argc, char* argv[]) {
         case 'b': {
             char* end = nullptr; errno = 0;
             long val = std::strtol(::optarg, &end, 10);
-            if (errno != 0 || end == ::optarg || *end != '\0' || val <= 0 || val > 32767) {
-                print(stderr, "mutar: invalid blocking factor '{}': must be 1..32767\n", ::optarg);
+            if (errno != 0 || end == ::optarg || *end != '\0' || val <= 0 ||
+                val > MAX_BLOCKING_FACTOR) {
+                print(stderr, "mutar: invalid blocking factor '{}': must be 1..{}\n",
+                      ::optarg, MAX_BLOCKING_FACTOR);
                 std::exit(EXIT_FAILURE);
             }
             cfg.blocking_factor = static_cast<int>(val);
@@ -7205,11 +7374,18 @@ static Config parse_args(int argc, char* argv[]) {
             // Convert record-size (bytes) to blocking factor (blocks of 512)
             char* endp = nullptr; errno = 0;
             long long sz = std::strtoll(::optarg, &endp, 10);
-            if (errno || endp == ::optarg || *endp != '\0' || sz <= 0 || sz % BLOCKSIZE != 0) {
+            if (errno || endp == ::optarg || *endp != '\0' || sz <= 0 ||
+                sz % static_cast<long long>(BLOCKSIZE) != 0) {
                 print(stderr, "mutar: invalid record-size '{}': must be a positive multiple of 512\n", ::optarg);
                 std::exit(EXIT_FAILURE);
             }
-            cfg.blocking_factor  = static_cast<int>(sz / BLOCKSIZE);
+            if (sz > static_cast<long long>(MAX_RECORD_SIZE)) {
+                print(stderr,
+                      "mutar: record-size {} is too large (maximum {}): memory exhausted\n",
+                      sz, MAX_RECORD_SIZE);
+                std::exit(EXIT_FAILURE);
+            }
+            cfg.blocking_factor  = static_cast<int>(sz / static_cast<long long>(BLOCKSIZE));
             cfg.record_size_str  = ::optarg;
             break;
         }
@@ -7579,13 +7755,10 @@ static Config parse_args(int argc, char* argv[]) {
         }
     }
 
-    // Remaining args are files (apply --unquote to positional names)
-    for (int i = ::optind; i < argc; ++i) {
-        std::string name = argv[i];
-        if (cfg.unquote)
-            name = unquote_name(name);
-        cfg.files.emplace_back(std::move(name));
-    }
+    // Rebuild member list in original order so each -C applies to following names.
+    cfg.files.clear();
+    cfg.file_chdir.clear();
+    collect_names_in_order(argv_copy, cfg);
 
     // Read files from -T / --files-from
     // GNU: --null implies verbatim; --verbatim-files-from disables option/unquote
@@ -7602,7 +7775,10 @@ static Config parse_args(int argc, char* argv[]) {
                 auto end = content.find('\0', start);
                 if (end == std::string::npos) end = content.size();
                 std::string item = content.substr(start, end - start);
-                if (!item.empty()) cfg.files.push_back(item);
+                if (!item.empty()) {
+                    cfg.files.push_back(item);
+                    cfg.file_chdir.push_back(cfg.directory);
+                }
                 if (end == content.size()) break;
                 start = end + 1;
             }
@@ -7616,6 +7792,7 @@ static Config parse_args(int argc, char* argv[]) {
                 if (cfg.verbatim_files_from) {
                     // Verbatim: filename as-is (no option parse, no unquote)
                     cfg.files.push_back(line);
+                    cfg.file_chdir.push_back(cfg.directory);
                     continue;
                 }
                 // Non-verbatim: strip whitespace; leading '-' is an option
@@ -7659,7 +7836,10 @@ static Config parse_args(int argc, char* argv[]) {
                     if (line.starts_with("--add-file=")) {
                         std::string n = line.substr(11);
                         if (cfg.unquote) n = unquote_name(n);
-                        if (!n.empty()) cfg.files.push_back(std::move(n));
+                        if (!n.empty()) {
+                            cfg.files.push_back(std::move(n));
+                            cfg.file_chdir.push_back(cfg.directory);
+                        }
                         continue;
                     }
                     print(stderr, "mutar: {}:{}: unrecognized option\n",
@@ -7668,8 +7848,10 @@ static Config parse_args(int argc, char* argv[]) {
                 }
                 if (cfg.unquote)
                     line = unquote_name(line);
-                if (!line.empty())
+                if (!line.empty()) {
                     cfg.files.push_back(line);
+                    cfg.file_chdir.push_back(cfg.directory);
+                }
             }
         }
     }
@@ -7803,6 +7985,7 @@ static void print_usage(const char* prog) {
         "  -B, --read-full-records         Reblock short reads to full records (4.2BSD pipes)\n"
         "  -i, --ignore-zeros              Ignore zeroed blocks in archive (means EOF)\n"
         "      --record-size=NUMBER        NUMBER of bytes per record, multiple of 512\n"
+        "                                  (maximum 16776704 = 32767 blocks)\n"
         "\nArchive format selection:\n"
         "      --format=FORMAT, -H FORMAT  Create archive of the given format (v7 oldgnu gnu ustar pax)\n"
         "      --old-archive, --portability  Same as --format=v7\n"
@@ -7827,7 +8010,7 @@ static void print_usage(const char* prog) {
         "      --backup[=CONTROL]          Backup before overwrite on extract; CONTROL:\n"
         "                                  none/off, simple/never (suffix), numbered/t (file.~N~),\n"
         "                                  existing/nil (numbered if .~1~ exists else simple)\n"
-        "  -C, --directory=DIR             Change to directory DIR\n"
+        "  -C, --directory=DIR             Change to DIR; each -C applies to following names\n"
         "      --exclude=PATTERN           Exclude files matching PATTERN\n"
         "      --exclude-backups           Exclude backup and lock files\n"
         "      --exclude-caches            Exclude contents of directories containing CACHEDIR.TAG\n"

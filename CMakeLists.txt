@@ -229,6 +229,14 @@ add_test(
 )
 set_tests_properties(mutar_hunt_fixes_tests PROPERTIES TIMEOUT 30)
 
+# Hunt R2: --delete size OOM, --record-size cap, base-256 overflow, multi -C, -C+-M
+add_test(
+  NAME mutar_hunt_r2_tests
+  COMMAND bash ${CMAKE_SOURCE_DIR}/tests/test_hunt_r2.sh $<TARGET_FILE:mutar>
+  WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+)
+set_tests_properties(mutar_hunt_r2_tests PROPERTIES TIMEOUT 30)
+
 # xattrs + ACLs store/restore via SCHILY PAX (GOAL_NEXT Phase D / G6–G8)
 add_test(
   NAME mutar_xattrs_acls_tests

@@ -15,6 +15,7 @@
 #include <filesystem>
 #include <format>
 #include <functional>
+#include <limits>
 #include <map>
 #include <optional>
 #include <span>
@@ -43,6 +44,10 @@ namespace mutar {
 
 inline constexpr std::size_t BLOCKSIZE     = 512;
 inline constexpr std::size_t DEFAULT_BLOCK = 20;   // 20 × 512 = 10 KiB record
+/// GNU-like cap: -b / --record-size must not allocate unbounded records.
+inline constexpr int         MAX_BLOCKING_FACTOR = 32767;
+inline constexpr std::size_t MAX_RECORD_SIZE =
+    static_cast<std::size_t>(MAX_BLOCKING_FACTOR) * BLOCKSIZE;
 
 // POSIX / ustar magic
 inline constexpr std::string_view TMAGIC   = "ustar";  // + NUL = 6 bytes
@@ -218,6 +223,9 @@ struct Config {
     std::string compress_prog;           // --use-compress-program
     std::string archive_file;            // -f
     std::vector<std::string> files;      // positional arguments
+    /// Parallel to `files`: -C directory in effect for that name (empty = CWD).
+    /// GNU: each -C applies to following member names (create).
+    std::vector<std::string> file_chdir;
     std::string label;                   // -V / --label
     std::string listed_incremental;      // -g
     std::string newer_than;              // -N / --newer / --newer-mtime
@@ -401,6 +409,7 @@ struct Entry {
     char         typeflag   = REGTYPE;
     std::int64_t size       = 0;   // logical size
     std::int64_t asize      = 0;   // archived size (sparse: may differ)
+    bool         size_invalid = false; // base-256/octal overflow or negative size
     std::int64_t mtime      = 0;   // seconds since epoch
     long         mtime_nsec = 0;
     std::int64_t atime      = 0;
@@ -463,22 +472,75 @@ inline bool is_base256(std::string_view field) noexcept {
     return !field.empty() && (static_cast<unsigned char>(field[0]) & 0x80) != 0;
 }
 
-inline std::int64_t read_base256(std::string_view field) noexcept {
-    if (field.empty()) return 0;
-    // The first byte carries the 0x80 marker and the 0x40 sign bit.
-    // Clear the marker bit before accumulating so it isn't part of the value.
-    unsigned char first = static_cast<unsigned char>(field[0]) & 0x7f;
-    bool negative = (first & 0x40) != 0;
-    std::int64_t v = negative ? -1 : 0;
-    v = (v << 8) | static_cast<std::int64_t>(first);
+/// Decode GNU/PAX base-256 into int64. Returns false on overflow (e.g. 2^80).
+/// First byte: 0x80 marker (cleared) and 0x40 sign; remaining bits are
+/// two's complement. A 12-byte field is a 95-bit signed integer.
+inline bool read_base256_i64(std::string_view field, std::int64_t& out) noexcept {
+    if (field.empty()) {
+        out = 0;
+        return true;
+    }
+    if (field.size() > 16)
+        return false;
+    const unsigned char first = static_cast<unsigned char>(field[0]) & 0x7f;
+    const bool negative = (first & 0x40) != 0;
+
+    std::uint64_t hi = 0;
+    std::uint64_t lo = 0;
+    auto feed = [&](unsigned char b) {
+        hi = (hi << 8) | (lo >> 56);
+        lo = (lo << 8) | b;
+    };
+    feed(first);
     for (std::size_t i = 1; i < field.size(); ++i)
-        v = (v << 8) | static_cast<unsigned char>(field[i]);
+        feed(static_cast<unsigned char>(field[i]));
+
+    if (negative) {
+        // Sign-extend from bit (8*n - 2) (the 0x40 bit of the first byte).
+        const unsigned signbit = static_cast<unsigned>(field.size() * 8u - 2u);
+        if (signbit >= 64u) {
+            const unsigned s = signbit - 64u;
+            const std::uint64_t keep = (s == 0u) ? 0u : ((std::uint64_t{1} << s) - 1u);
+            hi |= ~keep;
+        } else {
+            const std::uint64_t keep = (std::uint64_t{1} << signbit) - 1u;
+            lo |= ~keep;
+            hi = ~std::uint64_t{0};
+        }
+        if (hi != ~std::uint64_t{0} || (lo >> 63) == 0)
+            return false;
+        out = static_cast<std::int64_t>(lo);
+        return true;
+    }
+    if (hi != 0 ||
+        lo > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()))
+        return false;
+    out = static_cast<std::int64_t>(lo);
+    return true;
+}
+
+inline std::int64_t read_base256(std::string_view field) noexcept {
+    std::int64_t v = 0;
+    if (!read_base256_i64(field, v))
+        return 0;
     return v;
 }
 
+inline bool read_number_i64(std::string_view field, std::int64_t& out) noexcept {
+    if (is_base256(field))
+        return read_base256_i64(field, out);
+    const std::uint64_t v = read_octal(field);
+    if (v > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()))
+        return false;
+    out = static_cast<std::int64_t>(v);
+    return true;
+}
+
 inline std::uint64_t read_number(std::string_view field) noexcept {
-    if (is_base256(field)) return static_cast<std::uint64_t>(read_base256(field));
-    return read_octal(field);
+    std::int64_t v = 0;
+    if (!read_number_i64(field, v))
+        return 0;
+    return static_cast<std::uint64_t>(v);
 }
 
 // Write octal into a fixed-width field (width includes NUL if space allows).

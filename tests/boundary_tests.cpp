@@ -21,6 +21,7 @@
 #include <cstdint>
 #include <cstring>
 #include <iostream>
+#include <limits>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -86,6 +87,7 @@ static void test_read_octal() {
 
 static void test_read_base256() {
     using mutar::read_base256;
+    using mutar::read_base256_i64;
     using mutar::is_base256;
 
     // Build a 12-byte base-256 field for value 8 GiB (8 589 934 592)
@@ -147,6 +149,27 @@ static void test_read_base256() {
         std::memset(f + 1, 0xFF, 7);
         std::int64_t val = read_base256(std::string_view(f, 8));
         CHECK_EQ(val, static_cast<std::int64_t>(0x3FFFFFFFFFFFFFFFLL)); // 2^62 - 1
+    }
+
+    // 2^80 in a 12-byte field must be rejected (used to wrap to 0).
+    {
+        char f[12] = {};
+        f[0] = static_cast<char>(0x80);
+        f[1] = 0x01; // 0x01 << 80
+        std::int64_t val = 42;
+        CHECK(!read_base256_i64(std::string_view(f, 12), val));
+        CHECK_EQ(read_base256(std::string_view(f, 12)), 0LL);
+    }
+
+    // INT64_MAX still fits.
+    {
+        char f[12] = {};
+        f[0] = static_cast<char>(0x80);
+        f[4] = 0x7F;
+        std::memset(f + 5, 0xFF, 7);
+        std::int64_t val = 0;
+        CHECK(read_base256_i64(std::string_view(f, 12), val));
+        CHECK_EQ(val, std::numeric_limits<std::int64_t>::max());
     }
 }
 

@@ -830,3 +830,19 @@ Phase 8 parity re-audit (`$TMPDIR/grok-$(id -u)/mutar/parity/phase8-parity-repor
 
 **Tests:** `tests/test_hunt_fixes.sh` (CTest `mutar_hunt_fixes_tests`).
 
+---
+
+## Hunt R2 — crash / OOM / -C (2026-08-17)
+
+| ID | Issue | Status | Notes |
+|----|--------|--------|-------|
+| R2-1 | `--delete` `reserve(e.size)` on INT64_MAX / 1TiB | ✅ | Stream payload; never allocate claimed size |
+| R2-2 | `--record-size` 16MiB+ ASan abort | ✅ | Cap at 32767 blocks (16 776 704 B); “memory exhausted” |
+| R2-3 | base-256 size 2^80 decodes as 0 | ✅ | `read_base256_i64` rejects overflow; list/extract fail |
+| R2-4 | Multiple `-C` used only last dir | ✅ | Parse-order `(dir, name)` vector; create walks per name |
+| R2-5 | `-C` + `-M` later volumes under `-C` | ✅ | Absolutize `-f` at original CWD; create does not global-chdir |
+
+**Skipped / still partial:** extract still uses last `-C` for dest (not per-member); `-C` inside `-T` uses last CLI `-C`; relative `-C` chaining is path-join not live `chdir` (symlink/`..` may differ from GNU).
+
+**Tests:** `tests/test_hunt_r2.sh` (CTest `mutar_hunt_r2_tests`).
+
