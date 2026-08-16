@@ -9,7 +9,8 @@ It is **not** Jörg Schilling’s `star` (Schily tools).
 **SELinux is not supported** (no test hardware). Optional **sidecar index** (`--write-index` / `--mutar-index`) and **`--seekable`** enable fast list and seek extract (uncompressed direct seek; compressed materialize-then-seek). Run `./mutar --help` for options.
 
 > See `COMPATIBILITY_PROGRESS.md` for an option-by-option audit and
-> `ARCHITECTURE.md` for design details. Campaign plan: `GOAL.md`.
+> `ARCHITECTURE.md` for design details. Archived campaign: `GOAL.md`.
+> **Next work:** `GOAL_NEXT.md`.
 
 ## Status
 

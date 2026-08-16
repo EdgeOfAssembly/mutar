@@ -211,7 +211,7 @@ make_sparse "$W/input/fmt_test.bin" $((2*1024*1024)) "0:4096" "$((1*1024*1024)):
 ORIG_MD5=$(file_md5 "$W/input/fmt_test.bin")
 
 # Formats that support GNU sparse type: gnu, oldgnu (pax uses different sparse)
-# v7 and ustar don't have sparse support — star falls back to dense write
+# v7 and ustar don't have sparse support — mutar falls back to dense write
 for fmt in gnu oldgnu ustar pax; do
   out="$W/out_$fmt"
   mkdir -p "$out"

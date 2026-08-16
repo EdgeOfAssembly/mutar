@@ -190,11 +190,11 @@ test_interop_write() {
     make_tree "$W/input"
 
     # Write with mutar
-    "$MUTAR" -cf "$W/star.tar" -C "$W/input" .
+    "$MUTAR" -cf "$W/mutar.tar" -C "$W/input" .
 
     # Read with system tar
     local listing
-    listing="$("$TAR" -tf "$W/star.tar" 2>&1)"
+    listing="$("$TAR" -tf "$W/mutar.tar" 2>&1)"
     echo "$listing" | grep -q "file1.txt" || { echo "tar can't read mutar archive"; return 1; }
     return 0
 }

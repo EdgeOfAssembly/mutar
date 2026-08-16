@@ -1,14 +1,14 @@
 # µtar (mutar) — Master Goal Prompt
 
-**Status:** phases 0–7 complete (2026-08-16)  
+**Status:** phases 0–7 complete (2026-08-16) — **archived campaign**  
 **Date:** 2026-08-16  
 **Owner:** EdgeOfAssembly  
-**Local tree:** `/tmp/Star`  
-**Current remote:** `https://github.com/EdgeOfAssembly/star`  
-**Target remote:** `https://github.com/EdgeOfAssembly/mutar`
+**Local tree:** `/tmp/mutar`  
+**Remote:** `https://github.com/EdgeOfAssembly/mutar`  
+**Tag:** `v0.1.0`
 
-This file is the **single source of truth** for the multi-agent campaign.
-Any orchestrator session should load this first, then spawn subagents as specified.
+This file is the **historical campaign record** for the rename + index/seek freeze.
+For **new work**, use **`GOAL_NEXT.md`** (remaining features/gaps).
 
 ---
 
@@ -147,7 +147,7 @@ Parent keeps paths + decisions, not full file dumps.
 
 ```
 Thoroughness: medium
-Repo: /tmp/Star (soon mutar)
+Repo: /tmp/mutar (soon mutar)
 Return a bullet inventory:
 - All paths that contain product name "star" / "Star" / namespace mutar::
 - Build: CMake targets, binary name, ctest names
@@ -173,7 +173,7 @@ unset GITHUB_TOKEN
 gh repo rename mutar --repo EdgeOfAssembly/star
 # verify:
 gh repo view EdgeOfAssembly/mutar --json name,url
-git -C /tmp/Star remote set-url origin git@github.com:EdgeOfAssembly/mutar.git
+git -C /tmp/mutar remote set-url origin git@github.com:EdgeOfAssembly/mutar.git
 # or https://github.com/EdgeOfAssembly/mutar.git
 git ls-remote origin HEAD
 ```
@@ -193,7 +193,7 @@ git ls-remote origin HEAD
 **`[implement]` product rename**
 
 ```
-Task: Rename product star → µtar/mutar across /tmp/Star.
+Task: Rename product star → µtar/mutar across /tmp/mutar.
 
 LOCKED:
 - Brand: µtar
@@ -336,7 +336,7 @@ Write: $TMPDIR/grok-$(id -u)/mutar/phase5-plan.md
 ## 6. Build & test commands (canonical)
 
 ```bash
-cd /tmp/Star   # or renamed workdir
+cd /tmp/mutar
 
 # Tools (once)
 # gzip bzip2 xz zstd lzma lzip lzop gdb cmake build-essential
@@ -398,23 +398,11 @@ bash tests/test_seekable_compress.sh "$BIN"
 ```
 You are the orchestrator for the µtar/mutar campaign.
 
-Read and obey /tmp/Star/GOAL.md end-to-end.
+Campaign COMPLETE (v0.1.0). Do not re-run phases 0–7.
 
-Locked identity: brand µtar, binary mutar, repo EdgeOfAssembly/mutar.
+For new work: read and obey /tmp/mutar/GOAL_NEXT.md end-to-end.
+Locked identity: brand µtar, binary mutar, repo EdgeOfAssembly/mutar, tree /tmp/mutar.
 Compatibility: ~99% GNU tar 1.35; SELinux unsupported (no hardware).
-Order: Phase 0 → 1 → 2 → 3 → 4 → stop for user OK → 5 → 6 → 7.
-
-First actions:
-1. unset GITHUB_TOKEN; gh auth status; confirm EdgeOfAssembly/star access
-2. Spawn [explore] phase0 inventory
-3. Checkpoint git
-4. Phase 1 gh repo rename star → mutar
-5. Phase 2 tree rename with implement + review
-6. Run full sanitizer test suite yourself before declaring any phase done
-
-Use subagents per GOAL.md topology. Handoffs under $TMPDIR/grok-$(id -u)/mutar/.
-Do not start index/seek until rename + honesty phases are green and pushed.
-Report after each phase: what changed, commands+exit codes, residual risks.
 ```
 
 ---

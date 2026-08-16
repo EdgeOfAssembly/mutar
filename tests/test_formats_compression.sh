@@ -319,7 +319,7 @@ run_cross_mutar_to_systtar() {
 }
 
 # ── Cross-test: system tar creates → mutar extracts ───────────────────────────
-run_cross_systtar_to_star() {
+run_cross_systtar_to_mutar() {
   local cflag="$1"
   local ext="$2"
   local prog="$3"
@@ -411,7 +411,7 @@ echo "=== Cross-compatibility: system tar → mutar (all compressions) ==="
 for comp_spec in "${COMPRESSIONS[@]}"; do
   IFS=: read -r cflag ext prog <<< "$comp_spec"
   echo "[cross:tar→mutar ${prog}]"
-  run_cross_systtar_to_star "$cflag" "$ext" "$prog"
+  run_cross_systtar_to_mutar "$cflag" "$ext" "$prog"
 done
 
 echo ""

@@ -1,8 +1,7 @@
 # AGENTS.md — µtar (mutar) Agent Instructions
 
-This file is read by GitHub Copilot coding agents and any other AI coding agent before
-starting work in the mutar project. It extends the repo-wide rules in
-`AGENTS.md` (root) and `.github/copilot-instructions.md`.
+This file is read by coding agents before starting work in the mutar project.
+Active backlog: `GOAL_NEXT.md`. Archived rename campaign: `GOAL.md`.
 
 ---
 
@@ -10,9 +9,7 @@ starting work in the mutar project. It extends the repo-wide rules in
 
 Before writing any code:
 
-- [ ] Read `/AGENTS.md` (root — repo-wide rules)
-- [ ] Read `/.github/copilot-instructions.md` (build/test/debug strategy)
-- [ ] Read `/.github/instructions/star.instructions.md` (path-specific rules)
+- [ ] Read `AGENTS.md` (this file) and `GOAL.md` / `GOAL_NEXT.md` as applicable
 - [ ] **Read `tar.1` in full** — this is the authoritative spec
 - [ ] Install required tools (see below)
 
@@ -127,7 +124,7 @@ For any PR changing mutar behavior:
 
 ## Known No-Op Options (do not claim as implemented)
 
-See `/.github/instructions/star.instructions.md` section 5 for the full list. Summary:
+See `COMPATIBILITY_PROGRESS.md` for the full option audit. Summary of known gaps:
 
 - `--pax-option`, `--hole-detection`, `--level`, `--volno-file`
 - `--ignore-command-error`, `--no-ignore-command-error`

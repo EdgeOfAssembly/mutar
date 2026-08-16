@@ -310,7 +310,7 @@ static std::string write_tmp(const std::string& data) {
 }
 
 // Run mutar with given args, return exit code and captured stdout/stderr
-static int run_star(const std::vector<std::string>& args,
+static int run_mutar(const std::vector<std::string>& args,
                     std::string* out = nullptr) {
     static const char* MUTAR = nullptr;
     if (!MUTAR) {
@@ -355,19 +355,19 @@ static void test_pax_long_name() {
     std::string archive = std::string(tmpdir) + "/test.tar";
 
     // Create PAX archive
-    int rc = run_star({"--posix", "-cf", archive, "-C", tmpdir, longname});
+    int rc = run_mutar({"--posix", "-cf", archive, "-C", tmpdir, longname});
     CHECK_EQ(rc, 0);
 
     // List it back
     std::string listing;
-    rc = run_star({"-tf", archive}, &listing);
+    rc = run_mutar({"-tf", archive}, &listing);
     CHECK_EQ(rc, 0);
     CHECK(listing.find(longname) != std::string::npos);
 
     // Extract and verify
     char outdir[] = "/tmp/mutar_bt_out_XXXXXX";
     assert(::mkdtemp(outdir) != nullptr);
-    rc = run_star({"-xf", archive, "-C", outdir});
+    rc = run_mutar({"-xf", archive, "-C", outdir});
     CHECK_EQ(rc, 0);
 
     std::string extracted = std::string(outdir) + "/" + longname;
@@ -424,7 +424,7 @@ static void test_sanitize_path_traversal() {
     assert(::mkdtemp(outdir) != nullptr);
 
     // mutar should extract, but NOT to ../../evil.txt outside outdir
-    run_star({"-xf", archive, "-C", outdir});
+    run_mutar({"-xf", archive, "-C", outdir});
 
     // Check: the evil file must NOT have appeared in parent of outdir
     std::string parent = std::string(outdir);
@@ -447,25 +447,25 @@ static void test_blocking_factor_validation() {
     // -b 0 → must fail (exit != 0)
     {
         std::string out;
-        int rc = run_star({"-c", "-b", "0", "-f", "/dev/null", "/dev/null"}, &out);
+        int rc = run_mutar({"-c", "-b", "0", "-f", "/dev/null", "/dev/null"}, &out);
         CHECK(rc != 0);
     }
 
     // -b -1 → must fail
     {
-        int rc = run_star({"-c", "-b", "-1", "-f", "/dev/null", "/dev/null"});
+        int rc = run_mutar({"-c", "-b", "-1", "-f", "/dev/null", "/dev/null"});
         CHECK(rc != 0);
     }
 
     // -b not-a-number → must fail
     {
-        int rc = run_star({"-c", "-b", "abc", "-f", "/dev/null", "/dev/null"});
+        int rc = run_mutar({"-c", "-b", "abc", "-f", "/dev/null", "/dev/null"});
         CHECK(rc != 0);
     }
 
     // -b 32768 → must fail (above max 32767)
     {
-        int rc = run_star({"-c", "-b", "32768", "-f", "/dev/null", "/dev/null"});
+        int rc = run_mutar({"-c", "-b", "32768", "-f", "/dev/null", "/dev/null"});
         CHECK(rc != 0);
     }
 
@@ -479,7 +479,7 @@ static void test_blocking_factor_validation() {
             int fd = ::open(infile.c_str(), O_CREAT|O_WRONLY, 0644);
             assert(fd >= 0); ::write(fd, "x", 1); ::close(fd);
         }
-        int rc = run_star({"-c", "-b", "1", "-f", archive, "-C", tmpdir, "f.txt"});
+        int rc = run_mutar({"-c", "-b", "1", "-f", archive, "-C", tmpdir, "f.txt"});
         CHECK_EQ(rc, 0);
         (void)::system(("rm -rf " + std::string(tmpdir)).c_str());
     }
@@ -507,13 +507,13 @@ static void test_strip_components() {
 
     std::string archive = std::string(tmpdir) + "/test.tar";
     // Create: stored as a/b/c/file.txt (no ./ prefix in our impl)
-    run_star({"-cf", archive, "-C", tmpdir, "a"});
+    run_mutar({"-cf", archive, "-C", tmpdir, "a"});
 
     // strip-components=0 → exact path preserved
     {
         char od[] = "/tmp/mutar_bt_sc0_XXXXXX";
         assert(::mkdtemp(od) != nullptr);
-        run_star({"-xf", archive, "-C", od, "--strip-components=0"});
+        run_mutar({"-xf", archive, "-C", od, "--strip-components=0"});
         CHECK_EQ(::access((std::string(od)+"/a/b/c/file.txt").c_str(), F_OK), 0);
         (void)::system(("rm -rf " + std::string(od)).c_str());
     }
@@ -522,7 +522,7 @@ static void test_strip_components() {
     {
         char od[] = "/tmp/mutar_bt_sc1_XXXXXX";
         assert(::mkdtemp(od) != nullptr);
-        run_star({"-xf", archive, "-C", od, "--strip-components=1"});
+        run_mutar({"-xf", archive, "-C", od, "--strip-components=1"});
         CHECK_EQ(::access((std::string(od)+"/b/c/file.txt").c_str(), F_OK), 0);
         (void)::system(("rm -rf " + std::string(od)).c_str());
     }
@@ -531,7 +531,7 @@ static void test_strip_components() {
     {
         char od[] = "/tmp/mutar_bt_sc3_XXXXXX";
         assert(::mkdtemp(od) != nullptr);
-        run_star({"-xf", archive, "-C", od, "--strip-components=3"});
+        run_mutar({"-xf", archive, "-C", od, "--strip-components=3"});
         CHECK_EQ(::access((std::string(od)+"/file.txt").c_str(), F_OK), 0);
         (void)::system(("rm -rf " + std::string(od)).c_str());
     }
@@ -540,7 +540,7 @@ static void test_strip_components() {
     {
         char od[] = "/tmp/mutar_bt_sc4_XXXXXX";
         assert(::mkdtemp(od) != nullptr);
-        run_star({"-xf", archive, "-C", od, "--strip-components=4"});
+        run_mutar({"-xf", archive, "-C", od, "--strip-components=4"});
         CHECK_EQ(::access((std::string(od)+"/file.txt").c_str(), F_OK), -1);
         (void)::system(("rm -rf " + std::string(od)).c_str());
     }
@@ -595,11 +595,11 @@ static void test_empty_archive() {
     char od[] = "/tmp/mutar_bt_empty_XXXXXX";
     assert(::mkdtemp(od) != nullptr);
 
-    int rc = run_star({"-xf", archive, "-C", od});
+    int rc = run_mutar({"-xf", archive, "-C", od});
     CHECK_EQ(rc, 0);
 
     std::string listing;
-    rc = run_star({"-tf", archive}, &listing);
+    rc = run_mutar({"-tf", archive}, &listing);
     CHECK_EQ(rc, 0);
     CHECK(listing.empty() || listing == "\n");
 
@@ -625,11 +625,11 @@ static void test_binary_roundtrip() {
     }
 
     std::string archive = std::string(tmpdir) + "/t.tar";
-    run_star({"-cf", archive, "-C", tmpdir, "binary.bin"});
+    run_mutar({"-cf", archive, "-C", tmpdir, "binary.bin"});
 
     char od[] = "/tmp/mutar_bt_binout_XXXXXX";
     assert(::mkdtemp(od) != nullptr);
-    run_star({"-xf", archive, "-C", od});
+    run_mutar({"-xf", archive, "-C", od});
 
     // Compare byte-by-byte
     std::string extracted = std::string(od) + "/binary.bin";
@@ -665,12 +665,12 @@ static void test_block_boundary_files() {
             ::close(fd);
         }
         std::string archive = std::string(tmpdir) + "/t.tar";
-        int rc = run_star({"-cf", archive, "-C", tmpdir, "f"});
+        int rc = run_mutar({"-cf", archive, "-C", tmpdir, "f"});
         CHECK_EQ(rc, 0);
 
         char od[] = "/tmp/mutar_bt_blkout_XXXXXX";
         assert(::mkdtemp(od) != nullptr);
-        rc = run_star({"-xf", archive, "-C", od});
+        rc = run_mutar({"-xf", archive, "-C", od});
         CHECK_EQ(rc, 0);
 
         std::string extracted = std::string(od) + "/f";
@@ -699,12 +699,12 @@ static void test_uid_gid_overflow() {
 
     // Create a PAX archive (which records large uid/gid in extended headers)
     std::string archive = std::string(tmpdir) + "/t.tar";
-    int rc = run_star({"--posix", "-cf", archive, "-C", tmpdir, "f.txt"});
+    int rc = run_mutar({"--posix", "-cf", archive, "-C", tmpdir, "f.txt"});
     CHECK_EQ(rc, 0);
 
     // List should succeed (no crash from overflow arithmetic)
     std::string listing;
-    rc = run_star({"-tf", archive}, &listing);
+    rc = run_mutar({"-tf", archive}, &listing);
     CHECK_EQ(rc, 0);
 
     (void)::system(("rm -rf " + std::string(tmpdir)).c_str());
@@ -721,13 +721,13 @@ static void test_strip_components_extremes() {
         assert(fd >= 0); ::write(fd, "x", 1); ::close(fd);
     }
     std::string archive = std::string(tmpdir) + "/t.tar";
-    run_star({"-cf", archive, "-C", tmpdir, "f.txt"});
+    run_mutar({"-cf", archive, "-C", tmpdir, "f.txt"});
 
     char od[] = "/tmp/mutar_bt_scxout_XXXXXX";
     assert(::mkdtemp(od) != nullptr);
 
     // Very large strip count: all entries should simply be skipped, no crash
-    int rc = run_star({"-xf", archive, "-C", od, "--strip-components=2147483647"});
+    int rc = run_mutar({"-xf", archive, "-C", od, "--strip-components=2147483647"});
     // Should succeed (exit 0) even though nothing is extracted
     CHECK_EQ(rc, 0);
     // File must NOT have been extracted
@@ -751,19 +751,19 @@ static void test_normalize_member() {
         assert(fd >= 0); ::write(fd, "world", 5); ::close(fd);
     }
     std::string archive = std::string(tmpdir) + "/t.tar";
-    run_star({"-cf", archive, "-C", tmpdir, "hello.txt"});
+    run_mutar({"-cf", archive, "-C", tmpdir, "hello.txt"});
 
     // Extract specifying "./hello.txt" — must find "hello.txt"
     char od[] = "/tmp/mutar_bt_nmout_XXXXXX";
     assert(::mkdtemp(od) != nullptr);
-    int rc = run_star({"-xf", archive, "-C", od, "./hello.txt"});
+    int rc = run_mutar({"-xf", archive, "-C", od, "./hello.txt"});
     CHECK_EQ(rc, 0);
     CHECK_EQ(::access((std::string(od)+"/hello.txt").c_str(), F_OK), 0);
 
     // Also test ./././hello.txt
     char od2[] = "/tmp/mutar_bt_nmout2_XXXXXX";
     assert(::mkdtemp(od2) != nullptr);
-    rc = run_star({"-xf", archive, "-C", od2, "././hello.txt"});
+    rc = run_mutar({"-xf", archive, "-C", od2, "././hello.txt"});
     CHECK_EQ(rc, 0);
     CHECK_EQ(::access((std::string(od2)+"/hello.txt").c_str(), F_OK), 0);
 
@@ -803,12 +803,12 @@ static void test_null_terminated_files_from() {
     }
 
     // Create archive using --null -T
-    int rc = run_star({"-cf", archive, "--null", "-T", listfile, "-C", tmpdir});
+    int rc = run_mutar({"-cf", archive, "--null", "-T", listfile, "-C", tmpdir});
     CHECK_EQ(rc, 0);
 
     // List: both files must appear
     std::string listing;
-    rc = run_star({"-tf", archive}, &listing);
+    rc = run_mutar({"-tf", archive}, &listing);
     CHECK_EQ(rc, 0);
     CHECK(listing.find("alpha.txt") != std::string::npos);
     CHECK(listing.find("beta.txt")  != std::string::npos);
@@ -822,10 +822,10 @@ static void test_null_terminated_files_from() {
         ::close(fd);
     }
     std::string archive2 = std::string(tmpdir) + "/t2.tar";
-    rc = run_star({"-cf", archive2, "--null", "-T", list2, "-C", tmpdir});
+    rc = run_mutar({"-cf", archive2, "--null", "-T", list2, "-C", tmpdir});
     CHECK_EQ(rc, 0);
     std::string listing2;
-    rc = run_star({"-tf", archive2}, &listing2);
+    rc = run_mutar({"-tf", archive2}, &listing2);
     CHECK_EQ(rc, 0);
     CHECK(listing2.find("alpha.txt") != std::string::npos);
 

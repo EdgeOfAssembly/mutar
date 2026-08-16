@@ -521,7 +521,8 @@ compatibility.
 | `--check-device` / `--no-check-device` | `check_device` | Stored; device comparison not wired |
 | `--restrict` | `restrict_flag` | Stored; no privilege restrictions enforced |
 | `--quoting-style` | `quoting_style` | Stored; output quoting unchanged |
-| `--xattrs` / `--acls` / `--selinux` | `xattrs`, `acls`, `selinux` | Build-time feature detection via CMake. Each feature compiles in only when its library is found. Not yet stored in archive. |
+| `--xattrs` / `--acls` | `xattrs`, `acls` | Build-time detection; flags accepted; **store/restore not yet implemented** (GOAL_NEXT G6–G8) |
+| `--selinux` / `--no-selinux` | `selinux` | **Unsupported by policy** (no test hardware); accepted as no-op with warning |
 | `-G` / `-g` (incremental) | `listed_incremental` | ✅ PR #172: snapshot written at level-0; level≥1 skips unchanged files. Limitation: only regular files compared by mtime. |
 | `-M` (multi-volume) | `multi_volume` | 🔧 PR #172: volume naming + prompts work; ArchiveWriter stream-swap for mid-file continuation is TODO |
 | `--rsh-command` / `--rmt-command` | `rsh_command`, `rmt_command` | 🔧 PR #172: rmt bridge via rsh fork+pipe; O/R/W/C protocol implemented. Limitation: lseek over rmt not implemented |
