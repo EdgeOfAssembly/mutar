@@ -166,6 +166,8 @@ target_link_options(mutar PRIVATE
 # ── Install ────────────────────────────────────────────────────────────────────
 include(GNUInstallDirs)
 install(TARGETS mutar RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+install(FILES ${CMAKE_SOURCE_DIR}/mutar.1
+        DESTINATION ${CMAKE_INSTALL_MANDIR}/man1)
 
 # ── Tests (CTest) ──────────────────────────────────────────────────────────────
 enable_testing()

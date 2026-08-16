@@ -95,7 +95,7 @@ bash tests/test_xattrs_acls.sh build/mutar         → 12 passed, 0 failed
 ```
 
 Sanitizer Debug build: `-fsanitize=address,undefined -fno-sanitize-recover=all`.  
-**formal:** not run (Phase G).
+**formal:** not run at A–D gate (see Phase G below).
 
 ### Residual (do not claim done)
 
@@ -137,3 +137,49 @@ Notes:
 | G16 | Docs + help: materialize-then-seek only; uncompressed never materializes; optional index `# compressed=… seekable=materialize` |
 | G17 | Bench numbers above; `mutar_bench_smoke` CTest |
 | G18 | README disclaimer: no faster-than-GNU claims without numbers |
+
+---
+
+## GOAL_NEXT Phase G — formal + man page — 2026-08-16
+
+**Status:** G19–G20 complete.
+
+### G19 formal (`make verify`)
+
+| Item | Path / target | Result |
+|------|----------------|--------|
+| C reimplementation of `sanitize_path` | `formal/path_sanitize.c` | Mirrors `src/mutar.cpp` rules |
+| Fixture agreement test | `formal/path_agreement_test` | 18/18 fixtures PASS |
+| CBMC harness | `formal/path_harness.c` (`harness`, `harness_fixtures`) | **VERIFICATION SUCCESSFUL** (CBMC 6.10.0) |
+| Entry point | `Makefile` `verify: test` then formal | CTest first |
+
+Properties (bounded):
+- Nondet `harness` (`--unwind 6 --bounds-check`): `!absolute_names` ⇒ no leading `/`, no `..` component, non-empty result
+- `harness_fixtures` (`--unwind 16 --bounds-check --pointer-check`): `../../evil.txt` → `evil.txt`, `/etc/passwd` strip/keep, `a/b/../c` → `a/c`, `..`/`""` → `.`
+
+### G20 man page
+
+| Item | Path |
+|------|------|
+| Manual | `mutar.1` |
+| Install | CMake `install(FILES mutar.1 …/man1)` |
+| README | Points to `mutar.1` |
+| Lint | `mandoc -T lint mutar.1` clean |
+
+Sections: NAME, SYNOPSIS, DESCRIPTION (C++23, not Schily star, ~99%, SELinux unsupported), OPTIONS (main + mutar-specific index/seek/pax/multi-vol), DIFFERENCES FROM GNU TAR, FILES (`*.mutaridx`), EXIT STATUS, EXAMPLES, SEE ALSO, BUGS.
+
+### Verification (Phase G gate)
+
+```
+cmake --build build -j$(nproc)     → exit 0 (ASan/UBSan Debug)
+make test                          → 10/10 tests passed, 0 failed
+make verify                        → test + path_agreement_test + CBMC VERIFICATION SUCCESSFUL
+mandoc -T lint mutar.1             → exit 0
+```
+
+**formal:** ran — CBMC path sanitize properties VERIFIED + agreement fixtures green.
+
+### Residual after G
+
+- Phase H freeze v0.2.0
+- Multi-volume mid-file; full `--pax-option`; SELinux out of scope

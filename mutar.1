@@ -1,0 +1,296 @@
+.\" mutar.1 — man page for µtar (mutar)
+.\" SPDX-License-Identifier: GPL-3.0-or-later
+.TH MUTAR 1 "2026-08-16" "mutar 0.1.0" "User Commands"
+.SH NAME
+mutar \- µtar GNU-tar-compatible archiver
+.SH SYNOPSIS
+.B mutar
+.RI [ OPTION... ]
+.RI [ FILE... ]
+.SH DESCRIPTION
+.B mutar
+(brand name
+.BR µtar )
+is a ground-up C++23 reimplementation of GNU tar.
+It is
+.B not
+Jörg Schilling's
+.B star
+(Schily tools).
+.PP
+Compatibility goal is approximately
+.B 99%
+with GNU tar 1.35 for common archive formats
+.RB ( v7 ,
+.BR oldgnu ,
+.BR gnu ,
+.BR ustar ,
+.BR pax / posix )
+and the command-line interface described in
+.BR tar (1).
+.B SELinux is not supported
+(no test hardware; options are accepted as no-ops with a warning).
+.PP
+In addition to GNU tar-compatible operations, mutar provides an optional
+sidecar member index and seek-friendly compression for faster selective
+list/extract on large archives.
+.SH OPTIONS
+This section summarizes main operations and mutar-specific options.
+For the full GNU-compatible option set, run
+.B mutar \-\-help
+or see
+.BR tar (1).
+.SS Main operations
+.TP
+.BR \-c ", " \-\-create
+Create a new archive.
+.TP
+.BR \-x ", " \-\-extract ", " \-\-get
+Extract files from an archive.
+.TP
+.BR \-t ", " \-\-list
+List archive contents.
+.TP
+.BR \-r ", " \-\-append
+Append files to the end of an archive.
+.TP
+.BR \-u ", " \-\-update
+Append only files newer than the archive copy.
+.TP
+.BR \-A ", " \-\-catenate ", " \-\-concatenate
+Append tar archives to an archive.
+.TP
+.BR \-d ", " \-\-diff ", " \-\-compare
+Find differences between archive and filesystem.
+.TP
+.B \-\-delete
+Delete members from an archive (seekable, uncompressed).
+.TP
+.B \-\-test\-label
+Test or print the archive volume label.
+.SS Common options
+.TP
+.BR \-f ", " \-\-file=\fIARCHIVE\fR
+Use archive file or device
+.IR ARCHIVE
+(use
+.B \-
+for stdin/stdout).
+.TP
+.BR \-v ", " \-\-verbose
+List files processed.
+.TP
+.BR \-z ", " \-\-gzip
+Filter through gzip.
+.TP
+.BR \-j ", " \-\-bzip2
+Filter through bzip2.
+.TP
+.BR \-J ", " \-\-xz
+Filter through xz.
+.TP
+.B \-\-zstd
+Filter through zstd.
+.TP
+.BR \-C ", " \-\-directory=\fIDIR\fR
+Change to directory
+.I DIR
+before performing operations.
+.TP
+.BR \-P ", " \-\-absolute\-names
+Do not strip leading
+.B /
+from member names (disabled under
+.BR \-\-restrict ).
+.TP
+.BR \-p ", " \-\-preserve\-permissions
+Extract file permissions.
+.TP
+.BR \-S ", " \-\-sparse
+Handle sparse files efficiently.
+.TP
+.BI \-H " FORMAT" "\fR, \fB\-\-format=" FORMAT
+Create archive in
+.I FORMAT
+.RB ( v7 ,
+.BR oldgnu ,
+.BR gnu ,
+.BR ustar ,
+.BR pax ).
+Default write format is
+.BR gnu .
+.SS Mutar-specific options
+.TP
+.B \-\-write\-index
+On create, write a sidecar member index next to the archive as
+.IR ARCHIVE .mutaridx
+(format
+.BR MUTAR.INDEX.V1 ).
+Enables fast selective list/extract when the index is present.
+.TP
+.BI \-\-mutar\-index= FILE
+Use
+.I FILE
+as the sidecar index path (write on create; read on list/extract).
+.TP
+.B \-\-seekable
+Prefer seek-friendly compression for xz (multi-block) and zstd (chunked).
+Implies index generation.
+On compressed extract with an index, mutar materializes a temporary
+uncompressed view once, then seeks via the index (not true frame-level
+seek without materialize).
+.SS PAX and multi-volume notes
+.TP
+.BI \-\-pax\-option= delete= KEYWORD [,...]
+When writing PAX archives, suppress the listed keywords
+.RB ( delete=
+only; other
+.B \-\-pax\-option
+keywords are currently ignored).
+.TP
+.BR \-M ", " \-\-multi\-volume
+Create, list, or extract multi-volume archives.
+.TP
+.BI \-L " N" "\fR, \fB\-\-tape\-length=" N
+Rotate volume after approximately
+.IR N "×1024"
+bytes (implies
+.BR \-M ).
+Rotation is
+.B between members
+only; mid-file split across volumes is not supported.
+.TP
+.BI \-F " SCRIPT" "\fR, \fB\-\-info\-script=" SCRIPT
+Run
+.I SCRIPT
+at each volume boundary (implies
+.BR \-M ).
+Environment includes
+.B TAR_ARCHIVE
+and
+.BR TAR_VOLUME ;
+non-zero exit fails the operation.
+.TP
+.BI \-\-volno\-file= F
+Read/write the current volume number in file
+.I F
+(atomic update).
+.SS Security-related options
+.TP
+.B \-\-restrict
+Forbid
+.BR \-P / \-\-absolute\-names ,
+.BR \-\-to\-command ,
+and multi-volume mode.
+.TP
+Path sanitization on extract strips leading
+.B /
+(unless
+.BR \-P )
+and collapses
+.B ..
+components so members cannot escape the destination directory.
+.SH DIFFERENCES FROM GNU TAR
+.IP \(bu 3
+Product identity is
+.B µtar
+/
+.BR mutar ,
+not GNU tar and not Schily
+.BR star .
+.IP \(bu 3
+SELinux
+.RB ( \-\-selinux ,
+.BR \-\-no\-selinux )
+is unsupported: options are accepted as no-ops with a warning.
+.IP \(bu 3
+Sidecar index
+.RB ( \-\-write\-index ,
+.BR \-\-mutar\-index )
+and
+.B \-\-seekable
+are mutar extensions.
+.IP \(bu 3
+.B \-\-pax\-option
+implements
+.B delete=KEYWORD
+only.
+.IP \(bu 3
+Multi-volume supports between-member create/extract and volume scripts;
+mid-file continuation is not implemented.
+.IP \(bu 3
+Remote tape
+.RB ( rmt )
+supports open/read/write/close; remote lseek and remote append are not
+implemented.
+.IP \(bu 3
+Listed-incremental
+.RB ( \-g )
+snapshot V2 records files and directories with mtime and device; the skip
+filter is regular-file only (directories are always dumped).
+.IP \(bu 3
+.B \-\-sparse\-version
+is accepted but write always emits sparse format 1.0.
+.SH FILES
+.TP
+.I ARCHIVE.mutaridx
+Default sidecar index path when
+.B \-\-write\-index
+is used without
+.BR \-\-mutar\-index .
+Binary format magic
+.BR MUTAR.INDEX.V1 :
+per-member name, header offset, and size for seek extract.
+.SH EXIT STATUS
+.TP
+.B 0
+Success.
+.TP
+.B non\-zero
+Usage error, I/O failure, verification failure, or subprocess error
+(depending on options such as
+.BR \-\-ignore\-failed\-read ).
+.SH EXAMPLES
+.nf
+# Create a gzip-compressed archive
+mutar \-czf project.tar.gz src/
+
+# Extract into a directory
+mutar \-xf archive.tar \-C /tmp/dest
+
+# Create with sidecar index
+mutar \-cf archive.tar \-\-write\-index tree/
+
+# Seek-friendly xz + index
+mutar \-cJf archive.tar.xz \-\-seekable tree/
+
+# List using an explicit index
+mutar \-tf archive.tar \-\-mutar\-index=archive.mutaridx
+.fi
+.SH SEE ALSO
+.BR tar (1),
+.BR gzip (1),
+.BR bzip2 (1),
+.BR xz (1),
+.BR zstd (1)
+.PP
+Project documentation:
+.IR README.md ,
+.IR ARCHITECTURE.md ,
+.IR COMPATIBILITY_PROGRESS.md .
+.SH BUGS
+See
+.I COMPATIBILITY_PROGRESS.md
+in the source tree for the option-by-option audit.
+Known limitations include partial multi-volume mid-file split, partial
+.BR \-\-pax\-option ,
+unsupported SELinux, and compressed seek that materializes before seeking.
+.PP
+Report issues at
+.IR https://github.com/EdgeOfAssembly/mutar .
+.SH AUTHORS
+EdgeOfAssembly and contributors.
+.SH COPYRIGHT
+License GPL-3.0-or-later.
+This is free software: you are free to change and redistribute it.
+There is NO WARRANTY, to the extent permitted by law.

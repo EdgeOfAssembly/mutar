@@ -1,3 +1,4 @@
 build/
 *.o
 *.a
+formal/path_agreement_test

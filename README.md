@@ -10,6 +10,8 @@ It is **not** Jörg Schilling’s `star` (Schily tools).
 
 Performance claims require published benchmarks; see `PROGRESS.md` Phase F.
 
+> **Manual:** `mutar.1` (`man ./mutar.1` or `man mutar` after install).
+> **Formal:** `make verify` (CTest + path-sanitize fixtures + CBMC when available).
 > See `COMPATIBILITY_PROGRESS.md` for an option-by-option audit and
 > `ARCHITECTURE.md` for design details. Archived campaign: `GOAL.md`.
 > **Next work:** `GOAL_NEXT.md`.
