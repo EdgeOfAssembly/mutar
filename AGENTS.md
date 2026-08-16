@@ -1,7 +1,7 @@
 # AGENTS.md — µtar (mutar) Agent Instructions
 
 This file is read by coding agents before starting work in the mutar project.
-Active campaign: `GOAL_GNU_PARITY.md` (100% GNU tar CLI except SELinux).
+Campaign complete: `GOAL_GNU_PARITY.md` → **v0.3.0** (GNU tar 1.35 CLI except SELinux).
 Archived: `GOAL.md`, `GOAL_NEXT.md`.
 
 ---

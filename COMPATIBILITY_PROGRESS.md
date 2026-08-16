@@ -801,3 +801,17 @@ Phase 8 parity re-audit (`$TMPDIR/grok-$(id -u)/mutar/parity/phase8-parity-repor
 
 **Still not claimed:** writing GNU binary snapshot (mutar writes V2 only); SELinux.
 
+---
+
+## GOAL_GNU_PARITY Phase 10 — v0.3.0 freeze (2026-08-17)
+
+| Item | Status | Notes |
+|------|--------|-------|
+| `--ignore-failed-read` | ✅ | Create continues on unreadable files; exit 0 (P8-07) |
+| `--recursive-unlink` | ✅ | Empty dir hierarchy / remove blocking non-dir before extract (P8-08) |
+| Debug ASan ctest | ✅ | 15/15 passed |
+| `make verify` | ✅ | path fixtures + CBMC VERIFICATION SUCCESSFUL |
+| Tag | ✅ | **v0.3.0** |
+
+**Parity line:** **YES** except SELinux; listed-incremental write remains intentional `MUTAR_SNAPSHOT_V2`.
+

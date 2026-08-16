@@ -261,3 +261,75 @@ CTest targets: `mutar_tests`, `mutar_pr172_tests`, `mutar_index_seek_tests`,
 
 `v0.2.0` — GOAL_NEXT A–H freeze: pax-option delete=, multi-vol between-member,
 xattrs/ACLs, Phase E polish, benches, formal path sanitize + mutar.1.
+
+---
+
+## v0.3.0 freeze — GOAL_GNU_PARITY phases 0–10 — 2026-08-17
+
+**Status:** complete. Tag **`v0.3.0`**.  
+**Parity line:** **YES** except SELinux; listed-incremental **write** remains intentional **`MUTAR_SNAPSHOT_V2`** (GNU format 2 **read** supported).
+
+### Commits (main, campaign series)
+
+| SHA | Subject |
+|-----|---------|
+| `9ecce5d` | FEATURE v1 GOAL_GNU_PARITY 100% tar CLI except SELinux |
+| `683f7b8` | FEATURE v1 Phase 1 GNU tar CLI quick wins |
+| `d129f97` | FEATURE v1 Phase 2-3 exclude-ignore and incremental dumpdir |
+| `77149cf` | FEATURE v1 Phase 4 full pax-option |
+| `b621730` | FEATURE v1 Phase 5 mid-file multi-volume |
+| `7695f9a` | FEATURE v1 Phase 6-7 rmt lseek and preserve-order |
+| `1730b4b` | FIXUP v1 Phase 8 help honesty and residual pure no-ops |
+| `1360722` | FEATURE v1 Phase 8 residual parity gaps |
+| `ffed97b` | FIXUP v1 Extract "." member without parent-dir EINVAL |
+| `02dce78` | FEATURE v1 Wire ignore-failed-read and recursive-unlink |
+| *(this)* | FEATURE v1 Campaign freeze Phase 10 v0.3.0 GNU CLI parity |
+
+### Delivered (campaign)
+
+| Phase | Scope | Result |
+|-------|--------|--------|
+| 0–1 | Quick wins | unquote, quote-chars, sparse-version, atime-preserve, totals SIGNAL, `-o` v7, quoting styles, `--preserve`, show-snapshot-field-ranges |
+| 2–3 | exclude-ignore + incremental | `--exclude-ignore{,-recursive}`, `-G` dumpdir, `-g` skip + GNU snapshot read |
+| 4 | full `--pax-option` | delete=, exthdr.*, globexthdr.*, keyword=/:= |
+| 5 | mid-file multi-volume | `GNUTYPE_MULTIVOL` 'M' including sparse |
+| 6–7 | rmt + preserve-order | rmt O/R/W/L/C, remote -r/-u, `-s`/`--preserve-order` |
+| 8 | residuals | `--mode` symbolic, `-N` ctime, broader `--warning`, compressed remote, help honesty |
+| 9 | QA | Debug ASan+UBSan ctest 15/15; `make verify` CBMC green |
+| 10 | freeze | version 0.3.0, tag, durable, memory dual-write |
+| final | pure no-ops | `--ignore-failed-read`, `--recursive-unlink` wired + tested |
+
+### Test matrix (Phase 10 freeze gate)
+
+```
+cmake --build build -j$(nproc)                 → exit 0 (Debug ASan+UBSan)
+ctest --test-dir build --output-on-failure     → 15/15 passed, 0 failed
+make verify                                    → test + path_agreement_test (18/18)
+                                                 + CBMC VERIFICATION SUCCESSFUL
+
+bash tests/test_phase8_residuals.sh build/mutar → 11 passed (incl. P8-07/P8-08)
+```
+
+CTest targets: mutar_tests, mutar_pr172_tests, mutar_index_seek_tests,
+mutar_seekable_compress_tests, mutar_pax_option_tests, mutar_multi_volume_tests,
+mutar_extract_safety_tests, mutar_xattrs_acls_tests, mutar_phase_e_tests,
+mutar_phase1_parity_tests, mutar_phase2_3_parity_tests, mutar_phase6_7_parity_tests,
+mutar_phase8_residuals_tests, mutar_bench_smoke, mutar_boundary_tests.
+
+### Formal evidence
+
+| Item | Result |
+|------|--------|
+| `formal/path_agreement_test` | 18/18 fixtures PASS |
+| CBMC harness + harness_fixtures | VERIFICATION SUCCESSFUL |
+| CBMC version | 6.10.0 |
+
+### Residual (do not claim done)
+
+- SELinux store/restore (policy-unsupported forever without hardware)
+- True compressed frame-level seek without materialize (`TODO.md`)
+- Listed-incremental **write** of GNU snapshot format 2 (intentional `MUTAR_SNAPSHOT_V2`)
+
+### Tag
+
+`v0.3.0` — GOAL_GNU_PARITY freeze: GNU tar 1.35 CLI parity except SELinux.

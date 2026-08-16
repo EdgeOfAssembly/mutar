@@ -14,22 +14,22 @@ Performance claims require published benchmarks; see `PROGRESS.md` Phase F.
 > **Formal:** `make verify` (CTest + path-sanitize fixtures + CBMC when available).
 > See `COMPATIBILITY_PROGRESS.md` for an option-by-option audit and
 > `ARCHITECTURE.md` for design details. Archived: `GOAL.md`, `GOAL_NEXT.md`.
-> **Active campaign:** `GOAL_GNU_PARITY.md` — 100% GNU tar CLI except SELinux (→ v0.3.0).
+> **Campaign complete:** `GOAL_GNU_PARITY.md` — GNU tar 1.35 CLI parity except SELinux (**v0.3.0**).
 
 ## Status
 
-**v0.2.0 freeze (2026-08-16).** Campaign `GOAL_NEXT.md` phases A–H complete
-(on top of `GOAL.md` phases 0–7 / v0.1.0).
+**v0.3.0 freeze (2026-08-17).** Campaign `GOAL_GNU_PARITY.md` phases 0–10 complete
+(on top of `GOAL_NEXT.md` A–H / v0.2.0 and `GOAL.md` 0–7 / v0.1.0).
 
 | Area | Status |
 |------|--------|
 | Identity | µtar / `mutar` / [EdgeOfAssembly/mutar](https://github.com/EdgeOfAssembly/mutar) |
-| GNU tar interop | Formats + common CLI; **~99%** goal |
+| GNU tar CLI | **YES** except SELinux; listed-incremental **write** stays `MUTAR_SNAPSHOT_V2` (GNU format 2 **read** supported) |
 | SELinux | **Unsupported** (no-op + warning) |
 | Sidecar index | `--write-index` / `--mutar-index` |
 | Seek | Uncompressed direct `lseek`; compressed **materialize-then-seek** (`--seekable`) — not frame-level |
 | PAX options | full `--pax-option` (delete=, exthdr.*, globexthdr.*, keyword=/:=) |
-| Multi-volume | `-M -L` between-member + mid-file split (`GNUTYPE_MULTIVOL` 'M') |
+| Multi-volume | `-M -L` between-member + mid-file split (`GNUTYPE_MULTIVOL` 'M'), including sparse |
 | xattrs / ACLs | SCHILY PAX store/restore when host libs present |
 | Formal | `make verify` — path sanitize fixtures + CBMC |
 | Man page | `mutar.1` |
