@@ -846,3 +846,28 @@ Phase 8 parity re-audit (`$TMPDIR/grok-$(id -u)/mutar/parity/phase8-parity-repor
 
 **Tests:** `tests/test_hunt_r2.sh` (CTest `mutar_hunt_r2_tests`).
 
+---
+
+## Hunt R3 — leftover HIGH (2026-08-17)
+
+| ID | Issue | Status | Notes |
+|----|--------|--------|-------|
+| R3-1 | `-T -` / `-X -` used `ifstream("-")` | ✅ | `"-"` is stdin (`cin`), not a file named `-` |
+| R3-2 | `-f ''` treated as stdout | ✅ | Empty archive name is an error |
+| R3-3 | `-r`/`-u`/`--delete` on compressed | ✅ | Refuse; do not silently decompress/rewrite |
+| R3-4 | `--mtime=@SECONDS`; `1970-01-01` → year 2242 | ✅ | `@` epoch; ISO dates via `timegm` (UTC) |
+| R3-5 | ustar 100-byte name forced trailing NUL | ✅ | Full-field write; exact 100-byte names round-trip |
+| R3-6 | `--exclude=sub/*.o` missed `dir/sub/bar.o` | ✅ | GNU `--no-anchored` suffix match |
+| R3-7 | `--to-command` SIGPIPE `rc=-13` | ✅ | Ignore SIGPIPE; EPIPE consumes rest; `--ignore-command-error` |
+| R3-8 | 0-byte / non-tar extract exit 0 | ✅ | “This does not look like a tar archive”; nonzero |
+| R3-9 | `--one-top-level` double-prefix | ✅ | Skip wrap when member already under DIR |
+| R3-10 | `--strip-components` wrap to 0 | ✅ | `strtoll`; reject `> INT_MAX` (2^31 / 2^32) |
+| R3-11 | `--owner=NAME:UID` / `--owner=+UID` | ✅ | GNU parse; same for `--group` |
+| R3-12 | `-k` unlinked symlink/fifo dest | ✅ | Keep existing symlink/fifo/hardlink dest |
+| R3-13 | `-P` create stripped leading `/` | ✅ | Keep absolute names on create |
+
+**Tests:** `tests/test_hunt_r3.sh` (CTest `mutar_hunt_r3_tests`). ASan+UBSan clean.
+
+**Skipped:** none of the listed HIGH leftovers.
+
+

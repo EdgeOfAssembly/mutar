@@ -391,6 +391,42 @@ static Compress detect_compress_magic(int fd) {
     return Compress::None;
 }
 
+/// True if the archive is (or was requested as) compressed.
+/// -r / -u / --delete cannot rewrite a compressed stream in place.
+static bool archive_is_compressed(const Config& cfg) {
+    switch (cfg.compress) {
+    case Compress::Gzip:
+    case Compress::Bzip2:
+    case Compress::Xz:
+    case Compress::Zstd:
+    case Compress::Lzma:
+    case Compress::Lzip:
+    case Compress::Lzop:
+    case Compress::CompressZ:
+    case Compress::Custom:
+        return true;
+    default:
+        break;
+    }
+    if (cfg.archive_file.empty() || cfg.archive_file == "-")
+        return false;
+    if (detect_compress(cfg.archive_file) != Compress::None)
+        return true;
+    int fd = ::open(cfg.archive_file.c_str(), O_RDONLY);
+    if (fd < 0)
+        return false;
+    Compress mag = detect_compress_magic(fd);
+    ::close(fd);
+    return mag != Compress::None;
+}
+
+static bool refuse_compressed_update(const Config& cfg) {
+    if (!archive_is_compressed(cfg))
+        return false;
+    print(stderr, "mutar: Cannot update compressed archives\n");
+    return true;
+}
+
 // ── Remote tape (rmt) helpers ─────────────────────────────────────────────────
 
 static bool is_remote_archive(const std::string& path, bool force_local) {
@@ -1447,15 +1483,21 @@ static Block encode_header(const Entry& e, const Config& cfg) {
         // else: need a LongName extension — caller handles that
     }
 
-    auto write_field = [](char* dst, std::size_t n, std::string_view s) {
-        std::size_t len = std::min(s.size(), n - 1);
-        std::memcpy(dst, s.data(), len);
-        dst[len] = '\0';
+    // POSIX ustar: name/linkname/prefix may occupy the full field with no
+    // trailing NUL when the string is exactly the field width.
+    auto write_field = [](char* dst, std::size_t n, std::string_view s,
+                          bool allow_full = false) {
+        std::size_t maxn = allow_full ? n : (n > 0 ? n - 1 : 0);
+        std::size_t len = std::min(s.size(), maxn);
+        if (len > 0)
+            std::memcpy(dst, s.data(), len);
+        if (len < n)
+            dst[len] = '\0';
     };
 
-    write_field(h.name,     100, name);
-    write_field(h.linkname, 100, e.linkname);
-    write_field(h.prefix,   155, prefix);
+    write_field(h.name,     100, name, true);
+    write_field(h.linkname, 100, e.linkname, true);
+    write_field(h.prefix,   155, prefix, true);
 
     write_octal(h.mode,     8, e.mode & 07777);
     write_octal(h.uid,      8, e.uid);
@@ -2208,6 +2250,7 @@ static std::int64_t tape_max_blocks(const Config& cfg) {
 // Forward declarations of helpers used inside ArchiveWriter (defined later)
 static std::time_t parse_date_string(const std::string& s);
 static std::string apply_transform(const std::string& name, const std::string& expr);
+static void apply_owner_group_cli(Entry& e, const Config& cfg);
 
 struct SparseSegment { std::int64_t offset; std::int64_t length; };
 static std::vector<SparseSegment> detect_sparse_segments(int fd, std::int64_t file_size,
@@ -2258,8 +2301,14 @@ public:
 
         for (;;) {
             Block blk{};
-            if (!buf_.read_block(*stream_, blk))
+            if (!buf_.read_block(*stream_, blk)) {
+                if (!saw_any_block_) {
+                    print(stderr, "mutar: This does not look like a tar archive\n");
+                    failed_ = true;
+                }
                 return {{}, false, true};
+            }
+            saw_any_block_ = true;
 
             // EOF block: two consecutive zero blocks (or single if --ignore-zeros)
             if (is_zero_block(blk)) {
@@ -2430,6 +2479,12 @@ public:
                     ssize_t w = ::write(out_fd, p, left);
                     if (w < 0) {
                         if (errno == EINTR) continue;
+                        // Command closed the pipe (--to-command); keep
+                        // consuming the member so the archive stays aligned.
+                        if (errno == EPIPE) {
+                            out_fd = -1;
+                            break;
+                        }
                         if (got_out) *got_out = got_total;
                         return false;
                     }
@@ -2638,6 +2693,7 @@ public:
     BlockBuffer    buf_;
     bool           ignore_zeros_ = false;
     bool           failed_ = false;
+    bool           saw_any_block_ = false;
     const Config*  warn_cfg_ = nullptr;
     const PaxOptionRules* pax_rules_ = nullptr;
     std::map<std::string, std::string> cli_global_pax_;
@@ -2747,9 +2803,8 @@ public:
         // Lookup uname/gname
         if (struct passwd* pw = ::getpwuid(st.st_uid)) e.uname = pw->pw_name;
         if (struct group*  gr = ::getgrgid(st.st_gid)) e.gname = gr->gr_name;
+        apply_owner_group_cli(e, cfg);
         if (cfg.numeric_owner) { e.uname.clear(); e.gname.clear(); }
-        if (!cfg.owner.empty()) e.uname = cfg.owner;
-        if (!cfg.group.empty()) e.gname = cfg.group;
         // Apply --owner-map / --group-map
         if (owner_map_ || group_map_) {
             static const std::map<std::string,std::string> empty_map{};
@@ -3719,6 +3774,20 @@ static std::string normalize_member(std::string_view name) {
     return std::string(name);
 }
 
+// Prepend --one-top-level directory unless the member is already under it.
+static std::string apply_one_top_level(std::string path, const std::string& one_top) {
+    if (one_top.empty() || path == "." || path == "./")
+        return path;
+    std::string top = one_top;
+    while (top.size() > 1 && top.back() == '/')
+        top.pop_back();
+    if (path == top)
+        return path;
+    if (path.size() > top.size() && path.starts_with(top) && path[top.size()] == '/')
+        return path;
+    return top + "/" + path;
+}
+
 // Strip N leading path components
 static std::string strip_components(std::string_view path, int n) {
     for (int i = 0; i < n && !path.empty(); ++i) {
@@ -3747,6 +3816,19 @@ static bool pattern_matches_name(const Config& cfg, std::string_view name,
             std::string_view rem = name;
             while (!rem.empty()) {
                 auto slash = rem.find('/');
+                if (slash == std::string_view::npos)
+                    break;
+                rem = rem.substr(slash + 1);
+                if (rem.empty())
+                    break;
+                std::string ssuf(rem);
+                if (cfg.ignore_case ? ::strcasecmp(ssuf.c_str(), pat.c_str()) == 0
+                                    : ssuf == pat)
+                    return true;
+            }
+            rem = name;
+            while (!rem.empty()) {
+                auto slash = rem.find('/');
                 std::string_view comp = (slash == std::string_view::npos) ? rem : rem.substr(0, slash);
                 std::string scomp(comp);
                 if (!comp.empty() && (cfg.ignore_case
@@ -3764,6 +3846,21 @@ static bool pattern_matches_name(const Config& cfg, std::string_view name,
 
         if (::fnmatch(pat.c_str(), std::string(name).c_str(), flags) == 0)
             return true;
+        if (!cfg.anchored) {
+            // GNU --no-anchored: match against each path suffix so
+            // --exclude=sub/*.o matches dir/sub/bar.o.
+            std::string_view rem = name;
+            while (!rem.empty()) {
+                auto slash = rem.find('/');
+                if (slash == std::string_view::npos)
+                    break;
+                rem = rem.substr(slash + 1);
+                if (rem.empty())
+                    break;
+                if (::fnmatch(pat.c_str(), std::string(rem).c_str(), flags) == 0)
+                    return true;
+            }
+        }
         if (!cfg.anchored || pat.find('/') == std::string::npos) {
             int comp_flags = flags & ~FNM_PATHNAME;
             std::string_view rem = name;
@@ -3832,9 +3929,20 @@ static bool matches_ignore_patterns(const Config& cfg,
 }
 
 // ── Date parsing helper (--newer / --mtime) ──────────────────────────────────
-// Accepts: file path (uses its mtime), ISO date, or seconds-since-epoch.
+// Accepts: @SECONDS (Unix epoch), file path (uses its mtime), ISO date, or
+// seconds-since-epoch. Calendar dates are UTC (timegm): local mktime of
+// 1970-01-01 fails in TZ east of UTC and write_octal((uint64_t)-1) becomes
+// year 2242 (11 octal digits of all 7s).
 static std::time_t parse_date_string(const std::string& s) {
     if (s.empty()) return (std::time_t)-1;
+    // GNU: --mtime=@SECONDS is seconds since the Unix epoch
+    if (s[0] == '@') {
+        char* endp = nullptr; errno = 0;
+        long long v = std::strtoll(s.c_str() + 1, &endp, 10);
+        if (!errno && endp && *endp == '\0')
+            return static_cast<std::time_t>(v);
+        return (std::time_t)-1;
+    }
     // Try as a file path first
     struct stat st{};
     if (::stat(s.c_str(), &st) == 0) return st.st_mtime;
@@ -3847,9 +3955,8 @@ static std::time_t parse_date_string(const std::string& s) {
     for (const char** f = fmts; *f; ++f) {
         struct tm tm{}; char* end = ::strptime(s.c_str(), *f, &tm);
         if (end && (*end == '\0' || *end == 'Z')) {
-            tm.tm_isdst = -1;
-            // 'Z' means UTC — use timegm() to avoid local-timezone offset
-            return (*end == 'Z') ? ::timegm(&tm) : ::mktime(&tm);
+            tm.tm_isdst = 0;
+            return ::timegm(&tm);
         }
     }
     // Seconds since epoch
@@ -3857,6 +3964,96 @@ static std::time_t parse_date_string(const std::string& s) {
     long long v = std::strtoll(s.c_str(), &endp, 10);
     if (!errno && endp && *endp == '\0') return static_cast<std::time_t>(v);
     return (std::time_t)-1;
+}
+
+// GNU --owner=NAME[:UID] / --owner=+UID  (and the same for --group).
+struct IdSpec {
+    std::string name;
+    unsigned    id = 0;
+    bool        have_id = false;
+    bool        numeric_only = false;
+    bool        ok = false;
+};
+
+static IdSpec parse_id_spec(const std::string& spec, bool is_group) {
+    IdSpec r;
+    if (spec.empty())
+        return r;
+    if (spec[0] == '+') {
+        char* end = nullptr; errno = 0;
+        unsigned long v = std::strtoul(spec.c_str() + 1, &end, 10);
+        if (errno || end == spec.c_str() + 1 || !end || *end != '\0' || v > UINT_MAX)
+            return r;
+        r.id = static_cast<unsigned>(v);
+        r.have_id = true;
+        r.numeric_only = true;
+        r.ok = true;
+        return r;
+    }
+    auto colon = spec.find(':');
+    if (colon != std::string::npos) {
+        r.name = spec.substr(0, colon);
+        const char* num = spec.c_str() + colon + 1;
+        char* end = nullptr; errno = 0;
+        unsigned long v = std::strtoul(num, &end, 10);
+        if (errno || end == num || !end || *end != '\0' || v > UINT_MAX)
+            return r;
+        r.id = static_cast<unsigned>(v);
+        r.have_id = true;
+        r.ok = true;
+        return r;
+    }
+    char* end = nullptr; errno = 0;
+    unsigned long v = std::strtoul(spec.c_str(), &end, 10);
+    if (end && *end == '\0' && errno == 0 && v <= UINT_MAX) {
+        r.id = static_cast<unsigned>(v);
+        r.have_id = true;
+        if (is_group) {
+            if (struct group* gr = ::getgrgid(static_cast<gid_t>(r.id)))
+                r.name = gr->gr_name;
+        } else if (struct passwd* pw = ::getpwuid(static_cast<uid_t>(r.id))) {
+            r.name = pw->pw_name;
+        }
+        r.ok = true;
+        return r;
+    }
+    r.name = spec;
+    if (is_group) {
+        if (struct group* gr = ::getgrnam(spec.c_str())) {
+            r.id = static_cast<unsigned>(gr->gr_gid);
+            r.have_id = true;
+        }
+    } else if (struct passwd* pw = ::getpwnam(spec.c_str())) {
+        r.id = static_cast<unsigned>(pw->pw_uid);
+        r.have_id = true;
+    }
+    r.ok = true;
+    return r;
+}
+
+static void apply_owner_group_cli(Entry& e, const Config& cfg) {
+    if (!cfg.owner.empty()) {
+        IdSpec o = parse_id_spec(cfg.owner, false);
+        if (o.ok) {
+            if (o.numeric_only)
+                e.uname.clear();
+            else if (!o.name.empty())
+                e.uname = o.name;
+            if (o.have_id)
+                e.uid = o.id;
+        }
+    }
+    if (!cfg.group.empty()) {
+        IdSpec g = parse_id_spec(cfg.group, true);
+        if (g.ok) {
+            if (g.numeric_only)
+                e.gname.clear();
+            else if (!g.name.empty())
+                e.gname = g.name;
+            if (g.have_id)
+                e.gid = g.id;
+        }
+    }
 }
 
 // ── Name transform helper (--transform / --xform) ────────────────────────────
@@ -3979,7 +4176,8 @@ static bool walk_dir(const std::string& base_dir, const std::string& relpath,
     std::string archname = relpath;
     if (!cfg.directory.empty() && archname.starts_with(cfg.directory))
         archname = archname.substr(cfg.directory.size());
-    if (archname.starts_with("/")) archname = archname.substr(1);
+    if (archname.starts_with("/") && !cfg.absolute_names)
+        archname = archname.substr(1);
     // Normalize: strip leading ./ (e.g. "./dir1/f" → "dir1/f")
     while (archname.size() > 1 && archname.starts_with("./"))
         archname = archname.substr(2);
@@ -5230,9 +5428,8 @@ static int op_create(const Config& cfg) {
                     link_e.fmt        = fmt;
                     if (struct passwd* pw = ::getpwuid(hst.st_uid)) link_e.uname = pw->pw_name;
                     if (struct group*  gr = ::getgrgid(hst.st_gid)) link_e.gname = gr->gr_name;
+                    apply_owner_group_cli(link_e, cfg);
                     if (cfg.numeric_owner) { link_e.uname.clear(); link_e.gname.clear(); }
-                    if (!cfg.owner.empty()) link_e.uname = cfg.owner;
-                    if (!cfg.group.empty()) link_e.gname = cfg.group;
                     if (cfg.verbose) print("{}\n", archname);
                     writer.write_header_only(link_e, cfg);
                     return;
@@ -5301,9 +5498,8 @@ static int op_create(const Config& cfg) {
                 de.fmt        = fmt;
                 if (struct passwd* pw = ::getpwuid(dst.st_uid)) de.uname = pw->pw_name;
                 if (struct group*  gr = ::getgrgid(dst.st_gid)) de.gname = gr->gr_name;
+                apply_owner_group_cli(de, cfg);
                 if (cfg.numeric_owner) { de.uname.clear(); de.gname.clear(); }
-                if (!cfg.owner.empty()) de.uname = cfg.owner;
-                if (!cfg.group.empty()) de.gname = cfg.group;
                 if (!cfg.mtime.empty()) {
                     std::time_t mt = parse_date_string(cfg.mtime);
                     if (mt != (std::time_t)-1 &&
@@ -5749,9 +5945,9 @@ static int op_extract(const Config& cfg) {
             outpath = strip_components(outpath, cfg.strip_components);
             if (outpath.empty()) { reader.skip_entry(e); continue; }
         }
-        // Prepend --one-top-level directory
-        if (!one_top.empty() && outpath != "." && outpath != "./")
-            outpath = one_top + "/" + outpath;
+        // Prepend --one-top-level directory (do not double-prefix)
+        if (!one_top.empty())
+            outpath = apply_one_top_level(outpath, one_top);
 
         // Member selection: set match, or ordered single-pass with -s
         if (!want.empty()) {
@@ -5892,6 +6088,15 @@ static int op_extract(const Config& cfg) {
         }
         case SYMTYPE:
         {
+            if (cfg.keep_old_files) {
+                struct stat st{};
+                if (::lstat(outpath.c_str(), &st) == 0) {
+                    print(stderr, "mutar: {}: file exists\n", outpath);
+                    reader.skip_entry(e);
+                    exit_code = EXIT_FAILURE;
+                    break;
+                }
+            }
             ::unlink(outpath.c_str());
             if (::symlink(e.linkname.c_str(), outpath.c_str()) < 0) {
                 print(stderr, "mutar: symlink {}: {}\n", outpath, std::strerror(errno));
@@ -5912,8 +6117,8 @@ static int op_extract(const Config& cfg) {
                 link_target = apply_transform(link_target, cfg.transform_expr);
             if (cfg.strip_components > 0)
                 link_target = strip_components(link_target, cfg.strip_components);
-            if (!one_top.empty() && link_target != "." && link_target != "./")
-                link_target = one_top + "/" + link_target;
+            if (!one_top.empty())
+                link_target = apply_one_top_level(link_target, one_top);
             if (extract_hardlink(outpath, link_target, cfg) < 0) {
                 print(stderr, "mutar: hardlink {} -> {}: {}\n",
                            outpath, link_target, std::strerror(errno));
@@ -5938,6 +6143,15 @@ static int op_extract(const Config& cfg) {
         }
         case FIFOTYPE:
         {
+            if (cfg.keep_old_files) {
+                struct stat st{};
+                if (::lstat(outpath.c_str(), &st) == 0) {
+                    print(stderr, "mutar: {}: file exists\n", outpath);
+                    reader.skip_entry(e);
+                    exit_code = EXIT_FAILURE;
+                    break;
+                }
+            }
             ::unlink(outpath.c_str());
             if (::mkfifo(outpath.c_str(), e.mode & 07777) < 0) {
                 print(stderr, "mutar: mkfifo {}: {}\n", outpath, std::strerror(errno));
@@ -6110,7 +6324,18 @@ static int op_extract(const Config& cfg) {
                 ::waitpid(pid, &status, 0);
                 total_bytes += e.size;
                 add_running_total(e.size);
-                int child_rc = WIFEXITED(status) ? WEXITSTATUS(status) : 1;
+                int child_rc = 0;
+                if (WIFEXITED(status)) {
+                    child_rc = WEXITSTATUS(status);
+                } else if (WIFSIGNALED(status)) {
+                    int sig = WTERMSIG(status);
+                    if (sig == SIGPIPE && cfg.ignore_command_error)
+                        child_rc = 0;
+                    else
+                        child_rc = 128 + sig;
+                } else {
+                    child_rc = 1;
+                }
                 if (!data_ok || child_rc != 0) {
                     // GNU default: --no-ignore-command-error → non-zero is failure
                     if (cfg.ignore_command_error) {
@@ -6336,7 +6561,13 @@ static int op_extract(const Config& cfg) {
                 if (!e.gname.empty() && !cfg.numeric_owner) {
                     if (struct group* gr = ::getgrnam(e.gname.c_str())) gid_val = gr->gr_gid;
                 }
-                ::lchown(outpath.c_str(), uid_val, gid_val);
+                if (::lchown(outpath.c_str(), uid_val, gid_val) < 0 &&
+                    cfg.same_owner) {
+                    print(stderr, "mutar: {}: Cannot change ownership to uid {}, gid {}: {}\n",
+                          outpath, static_cast<unsigned>(uid_val),
+                          static_cast<unsigned>(gid_val), std::strerror(errno));
+                    exit_code = EXIT_FAILURE;
+                }
             }
 
             // Extended attributes and POSIX ACLs (SCHILY.* from PAX header)
@@ -6460,6 +6691,8 @@ static int op_diff(const Config& cfg) {
 static int op_append(const Config& cfg) {
     // Find end of archive, then write new entries
     // The archive must be seekable (no compression); remote uses rmt L.
+    if (refuse_compressed_update(cfg))
+        return EXIT_FAILURE;
     auto res = ArchiveStream::open_rdwr(cfg);
     if (!res) {
         print(stderr, "mutar: {}\n", res.error().message);
@@ -6514,6 +6747,8 @@ static int op_append(const Config& cfg) {
 // ── update (-u): like append but only for newer files ─────────────────────────
 
 static int op_update(const Config& cfg) {
+    if (refuse_compressed_update(cfg))
+        return EXIT_FAILURE;
     // Read existing archive to collect entry mtimes
     std::map<std::string, std::int64_t> archive_mtimes;
     {
@@ -6559,6 +6794,8 @@ static int op_update(const Config& cfg) {
 // ── delete (--delete) ─────────────────────────────────────────────────────────
 
 static int op_delete(const Config& cfg) {
+    if (refuse_compressed_update(cfg))
+        return EXIT_FAILURE;
     // Read whole archive, write matching entries to a temp file, then replace.
     std::set<std::string> to_delete(cfg.files.begin(), cfg.files.end());
 
@@ -7257,7 +7494,13 @@ static Config parse_args(int argc, char* argv[]) {
         case OPT_DELETE:     set_op(cfg, Operation::Delete,    0); break;
         case OPT_TEST_LABEL: set_op(cfg, Operation::TestLabel, 0); break;
 
-        case 'f': cfg.archive_file = ::optarg; break;
+        case 'f':
+            if (!::optarg || ::optarg[0] == '\0') {
+                print(stderr, "mutar: empty archive name\n");
+                std::exit(EXIT_FAILURE);
+            }
+            cfg.archive_file = ::optarg;
+            break;
         case 'v': cfg.verbose = true; break;
         case 'z': cfg.compress = Compress::Gzip;  break;
         case 'j': cfg.compress = Compress::Bzip2; break;
@@ -7338,8 +7581,24 @@ static Config parse_args(int argc, char* argv[]) {
 
         case OPT_OLD_ARCHIVE:        cfg.fmt = Format::V7; break;
         case OPT_POSIX:              cfg.fmt = Format::PAX; cfg.posix = true; break;
-        case OPT_OWNER:              cfg.owner = ::optarg; break;
-        case OPT_GROUP:              cfg.group = ::optarg; break;
+        case OPT_OWNER: {
+            IdSpec o = parse_id_spec(::optarg ? ::optarg : "", false);
+            if (!o.ok) {
+                print(stderr, "mutar: invalid owner '{}'\n", ::optarg ? ::optarg : "");
+                std::exit(EXIT_FAILURE);
+            }
+            cfg.owner = ::optarg;
+            break;
+        }
+        case OPT_GROUP: {
+            IdSpec g = parse_id_spec(::optarg ? ::optarg : "", true);
+            if (!g.ok) {
+                print(stderr, "mutar: invalid group '{}'\n", ::optarg ? ::optarg : "");
+                std::exit(EXIT_FAILURE);
+            }
+            cfg.group = ::optarg;
+            break;
+        }
         case OPT_MTIME:              cfg.mtime = ::optarg; break;
         case OPT_MODE:               cfg.mode_str = ::optarg; break;
         case OPT_NUMERIC_OWNER:      cfg.numeric_owner = true; break;
@@ -7357,8 +7616,9 @@ static Config parse_args(int argc, char* argv[]) {
         case OPT_HARD_DEREFERENCE:   cfg.hard_dereference = true; break;
         case OPT_STRIP_COMPONENTS: {
             char* end = nullptr; errno = 0;
-            long val = std::strtol(::optarg, &end, 10);
-            if (errno != 0 || end == ::optarg || *end != '\0' || val < 0) {
+            long long val = std::strtoll(::optarg, &end, 10);
+            if (errno != 0 || end == ::optarg || *end != '\0' || val < 0 ||
+                val > static_cast<long long>(INT_MAX)) {
                 print(stderr, "mutar: invalid strip-components '{}'\n", ::optarg);
                 std::exit(EXIT_FAILURE);
             }
@@ -7763,12 +8023,20 @@ static Config parse_args(int argc, char* argv[]) {
     // Read files from -T / --files-from
     // GNU: --null implies verbatim; --verbatim-files-from disables option/unquote
     // handling of lines; default (--no-verbatim) treats leading '-' as options.
+    // "-" means stdin (ifstream("-") would open a file named "-").
     for (const auto& fname : cfg.files_from) {
-        std::ifstream ifs(fname);
-        if (!ifs) { print(stderr, "mutar: {}: cannot open\n", fname); continue; }
+        std::ifstream ifs;
+        std::istream* in = nullptr;
+        if (fname == "-") {
+            in = &std::cin;
+        } else {
+            ifs.open(fname);
+            if (!ifs) { print(stderr, "mutar: {}: cannot open\n", fname); continue; }
+            in = &ifs;
+        }
         if (cfg.null_terminated) {
             // --null: NUL-separated, always verbatim (no option parse / no unquote)
-            std::string content((std::istreambuf_iterator<char>(ifs)),
+            std::string content((std::istreambuf_iterator<char>(*in)),
                                  std::istreambuf_iterator<char>());
             std::size_t start = 0;
             while (start < content.size()) {
@@ -7785,7 +8053,7 @@ static Config parse_args(int argc, char* argv[]) {
         } else {
             std::string line;
             int lineno = 0;
-            while (std::getline(ifs, line)) {
+            while (std::getline(*in, line)) {
                 ++lineno;
                 if (line.empty())
                     continue;
@@ -7856,12 +8124,19 @@ static Config parse_args(int argc, char* argv[]) {
         }
     }
 
-    // Process --exclude-from / -X files
+    // Process --exclude-from / -X files ("-" = stdin)
     for (const auto& fname : cfg.exclude_from) {
-        std::ifstream ifs(fname);
-        if (!ifs) { print(stderr, "mutar: {}: cannot open\n", fname); continue; }
+        std::ifstream ifs;
+        std::istream* in = nullptr;
+        if (fname == "-") {
+            in = &std::cin;
+        } else {
+            ifs.open(fname);
+            if (!ifs) { print(stderr, "mutar: {}: cannot open\n", fname); continue; }
+            in = &ifs;
+        }
         std::string line;
-        while (std::getline(ifs, line)) {
+        while (std::getline(*in, line)) {
             if (!line.empty()) cfg.exclude_patterns.push_back(line);
         }
     }
@@ -7930,15 +8205,15 @@ static void print_usage(const char* prog) {
         "                                  METHOD=replace (default) or system (O_NOATIME)\n"
         "      --clamp-mtime               Only set time when the file is more recent than what was given with --mtime\n"
         "      --delay-directory-restore   Delay setting mtime/mode of extracted directories until end\n"
-        "      --group=NAME                Force NAME as group for added files\n"
+        "      --group=NAME[:GID]          Force NAME as group for added files (+GID or NAME:GID)\n"
         "      --group-map=FILE            Use FILE to map file owner GIDs\n"
         "      --mode=CHANGES              Force mode CHANGES for added files (octal or symbolic u+x,go-w)\n"
-        "      --mtime=DATE-OR-FILE        Set mtime for added files from DATE-OR-FILE\n"
+        "      --mtime=DATE-OR-FILE        Set mtime from DATE, @SECONDS (UTC epoch), or FILE\n"
         "      --no-delay-directory-restore  Apply directory mtime/mode immediately (default)\n"
         "      --no-same-owner             Extract files as yourself (default for ordinary users)\n"
         "      --no-same-permissions       Apply the user's umask when extracting permissions\n"
         "      --numeric-owner             Always use numbers for user/group names\n"
-        "      --owner=NAME                Force NAME as owner for added files\n"
+        "      --owner=NAME[:UID]          Force NAME as owner (+UID or NAME:UID like GNU)\n"
         "      --owner-map=FILE            Use FILE to map file owner UIDs\n"
         "  -m, --touch                    Don't extract file modified time\n"
         "  -p, --preserve-permissions, --same-permissions  Extract information about file permissions\n"
@@ -8045,12 +8320,12 @@ static void print_usage(const char* prog) {
         "  -P, --absolute-names            Don't strip leading '/'s from file names\n"
         "      --recursion                 Recurse into directories (default)\n"
         "      --suffix=STRING             Backup before removal, override usual suffix ('~')\n"
-        "  -T, --files-from=FILE           Get names to extract or create from FILE\n"
+        "  -T, --files-from=FILE           Get names to extract or create from FILE (- = stdin)\n"
         "      --unquote                   Unquote input file or member names (default)\n"
         "      --verbatim-files-from       -T reads file names verbatim (no option/unquote handling)\n"
         "      --wildcards                 Use wildcards (default)\n"
         "      --wildcards-match-slash      Wildcards match '/' when on by default\n"
-        "  -X, --exclude-from=FILE         Exclude patterns listed in FILE\n"
+        "  -X, --exclude-from=FILE         Exclude patterns listed in FILE (- = stdin)\n"
         "\nFile name transformations:\n"
         "      --strip-components=NUMBER   Strip NUMBER leading components from file names on extraction\n"
         "      --transform=EXPRESSION, --xform=EXPRESSION  Use sed replace EXPRESSION to transform file names\n"
@@ -8123,6 +8398,10 @@ int main(int argc, char* argv[]) {
             return EXIT_SUCCESS;
         }
     }
+
+    // GNU tar ignores SIGPIPE so --to-command that closes stdin early
+    // (true, head, …) does not kill the process with rc=-13 / 141.
+    ::signal(SIGPIPE, SIG_IGN);
 
     Config cfg = parse_args(argc, argv);
 
