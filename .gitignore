@@ -1,4 +1,6 @@
 build/
+build-profile/
+build-release/
 *.o
 *.a
 formal/path_agreement_test
