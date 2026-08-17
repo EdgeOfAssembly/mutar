@@ -62,6 +62,27 @@ These are **real** GNU mismatches / polish, not crashes. Targeted FIXUP series, 
 - Measure: same `/usr/src/linux` tree, `mutar -cf - \| gzip` vs entropy-sorted, report size delta
 - Cheap estimator first (byte histogram / 4k sample), not full compress twice
 
+### Archive deltas (experimental — not GNU tar)
+
+**Today:** mutar has **no** archive-to-archive delta/patch.  
+`-g` / `-G` incremental is **filesystem** “which paths changed since snapshot”, not “diff two tars”.
+
+**Idea:** given base archive A (plain or compressed) and new archive or tree B, emit a **delta** (plain or compressed) that can be applied onto A to reconstruct B. Chain: `1.0` base + `1.5` + `1.8` + `2.0` deltas.
+
+**Why it might belong in mutar (not just `xdelta3 A B`):**
+- Member-aware: match by name/hardlink, emit add / replace / delete / rename
+- Reuse `MUTAR.INDEX.V1` + content hashes; only store changed members (or binary patches of those members)
+- Apply without unpacking the whole tree to disk
+
+**Why it is hard / easy to do badly:**
+- Compressed A/B must be decompressed (or seekable) before a useful member delta
+- Whole-file `xdelta`/`zstd --patch-from` already exists and often wins on two `.tar` blobs
+- Apply-chain integrity needs checksums; a bad delta corrupts the whole product
+- Not GNU tar; keep **off `main` default**
+
+**Suggested branch:** `exp/archive-delta`  
+Sketch CLI (names TBD): `--delta-from=BASE` on create; `--apply-delta=DELTA` onto a base. Measure size vs full B and vs `xdelta3` on the two tars.
+
 ---
 
 ## Still deferred (not scheduled)
