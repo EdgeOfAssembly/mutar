@@ -14,6 +14,9 @@
 # R3-11  --owner=NAME:UID and --owner=+UID
 # R3-12  -k keeps existing symlink / fifo / hardlink dest
 # R3-13  -P create keeps leading /
+# R3-F1  PAX GNU.sparse.map 2^62+2^62 must not UBSan-overflow asize
+# R3-F2  --delete/-u/-A oversized L/g/x must fail without replacing archive
+# R3-F3  -g /dev/urandom --level=1 must not hang on unbounded getline
 #
 # Usage: ./test_hunt_r3.sh [/path/to/mutar]
 set -uo pipefail
@@ -415,6 +418,177 @@ echo "[R3-13] -P create keeps leading /"
     pass "R3-13: -P create keeps leading /"
   else
     fail "R3-13" "listed without leading /: $list"
+  fi
+}
+
+# Craft a single ustar header + optional payload/EOF (same layout as hunt R2).
+write_hdr() {
+  python3 - "$1" "$2" "$3" "$4" "${5:-0}" "${6:-0}" "${7:-2}" <<'PY'
+import sys
+path, name, size_s, tf, b256, pay, eof = sys.argv[1:8]
+size = int(size_s)
+base256 = int(b256)
+pay_n = int(pay)
+eof_n = int(eof)
+blk = bytearray(512)
+nb = name.encode("utf-8", "surrogateescape")[:99]
+blk[0:len(nb)] = nb
+blk[100:108] = b"0000644\0"
+blk[108:116] = b"0000000\0"
+blk[116:124] = b"0000000\0"
+if base256:
+    v = size
+    raw = bytearray(12)
+    for i in range(11, -1, -1):
+        raw[i] = v & 0xFF
+        v >>= 8
+    raw[0] |= 0x80
+    blk[124:136] = raw
+else:
+    blk[124:136] = f"{size:011o}\0".encode("ascii")
+blk[136:148] = b"00000000000\0"
+blk[156] = ord(tf) if len(tf) == 1 else tf.encode("ascii")[0]
+blk[257:265] = b"ustar  \0"
+csum = 0
+for i, b in enumerate(blk):
+    csum += (0x20 if 148 <= i < 156 else b)
+blk[148:156] = f"{csum:06o}\0 ".encode("ascii")
+with open(path, "wb") as f:
+    f.write(blk)
+    if pay_n:
+        f.write(b"\0" * pay_n)
+    if eof_n:
+        f.write(b"\0" * (512 * eof_n))
+PY
+}
+
+# ── R3-F1: PAX GNU.sparse.map asize overflow ──────────────────────────────────
+echo "[R3-F1] PAX GNU.sparse.map 2^62+2^62 no UBSan overflow"
+{
+  D="$TMPBASE/r3_f1"
+  mkdir -p "$D"
+  python3 - "$D/sparse.tar" <<'PY'
+import sys
+path = sys.argv[1]
+
+def checksum(blk):
+    return sum((0x20 if 148 <= i < 156 else b) for i, b in enumerate(blk))
+
+def hdr(name, size, tf):
+    blk = bytearray(512)
+    nb = name.encode("utf-8")[:99]
+    blk[0:len(nb)] = nb
+    blk[100:108] = b"0000644\0"
+    blk[108:116] = b"0000000\0"
+    blk[116:124] = b"0000000\0"
+    blk[124:136] = f"{size:011o}\0".encode("ascii")
+    blk[136:148] = b"00000000000\0"
+    blk[156] = ord(tf)
+    blk[257:265] = b"ustar\x0000"
+    blk[148:156] = f"{checksum(blk):06o}\0 ".encode("ascii")
+    return bytes(blk)
+
+def pax_rec(k, v):
+    body = f" {k}={v}\n"
+    for nlen in range(1, 8):
+        rec = f"{len(body) + nlen}{body}"
+        if len(rec) == len(body) + nlen:
+            return rec.encode("ascii")
+    raise SystemExit("pax length")
+
+n62 = 1 << 62
+payload = pax_rec("GNU.sparse.map", f"0,{n62},{n62},{n62}")
+pad = (512 - (len(payload) % 512)) % 512
+data = hdr("PaxHeader/sparse.bin", len(payload), "x")
+data += payload + (b"\0" * pad)
+data += hdr("sparse.bin", 0, "0")
+data += b"\0" * 1024
+open(path, "wb").write(data)
+PY
+  set +e
+  UBSAN_OPTIONS="${UBSAN_OPTIONS:+$UBSAN_OPTIONS:}halt_on_error=1:print_stacktrace=1" \
+    run_to "$MUTAR" -tf "$D/sparse.tar" >"$D/t.out" 2>"$D/t.err"
+  rc=$?
+  set -e
+  if [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then
+    fail "R3-F1" "timed out / killed rc=$rc"
+  elif [ "$rc" -ge 128 ]; then
+    fail "R3-F1" "UBSan/signal rc=$rc err=$(head -c 240 "$D/t.err")"
+  else
+    pass "R3-F1: GNU.sparse.map 2^62+2^62 no overflow abort (rc=$rc)"
+  fi
+}
+
+# ── R3-F2: oversized L/g/x must not clobber on --delete/-u/-A ─────────────────
+echo "[R3-F2] --delete/-u/-A oversized L/g/x fail without replacing archive"
+{
+  D="$TMPBASE/r3_f2"
+  mkdir -p "$D"
+  printf 'keep\n' >"$D/keep.txt"
+  printf 'new\n' >"$D/new.txt"
+  run_to "$MUTAR" -cf "$D/good.tar" -C "$D" keep.txt
+  # 16MiB+1 exceeds k_max_metadata; no payload — read_data_string fails immediately
+  ok=1
+  for spec in "L:delete" "x:update" "g:cat"; do
+    tf="${spec%%:*}"
+    op="${spec#*:}"
+    write_hdr "$D/${op}.tar" "././@LongLink" "16777217" "$tf" 0 0 2
+    orig_md5=$(md5sum "$D/${op}.tar" | awk '{print $1}')
+    set +e
+    case "$op" in
+      delete)
+        run_to "$MUTAR" --delete -f "$D/${op}.tar" keep.txt \
+          >"$D/${op}.out" 2>"$D/${op}.err"
+        ;;
+      update)
+        run_to "$MUTAR" -u -f "$D/${op}.tar" -C "$D" new.txt \
+          >"$D/${op}.out" 2>"$D/${op}.err"
+        ;;
+      cat)
+        run_to "$MUTAR" -A -f "$D/${op}.tar" "$D/good.tar" \
+          >"$D/${op}.out" 2>"$D/${op}.err"
+        ;;
+    esac
+    rc=$?
+    set -e
+    new_md5=$(md5sum "$D/${op}.tar" | awk '{print $1}')
+    if [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then
+      fail "R3-F2-$op" "timed out / killed rc=$rc"
+      ok=0
+    elif [ "$rc" -ge 128 ]; then
+      fail "R3-F2-$op" "signaled rc=$rc err=$(head -c 160 "$D/${op}.err")"
+      ok=0
+    elif [ "$rc" -eq 0 ]; then
+      fail "R3-F2-$op" "exit 0 on oversized $tf (archive may be clobbered)"
+      ok=0
+    elif [ "$new_md5" != "$orig_md5" ]; then
+      fail "R3-F2-$op" "archive replaced after failed $op"
+      ok=0
+    fi
+  done
+  if [ "$ok" -eq 1 ]; then
+    pass "R3-F2: --delete/-u/-A fail on oversized L/g/x; archive unchanged"
+  fi
+}
+
+# ── R3-F3: -g /dev/urandom --level=1 must not hang ────────────────────────────
+echo "[R3-F3] -g /dev/urandom --level=1 rejects quickly"
+{
+  D="$TMPBASE/r3_f3"
+  mkdir -p "$D"
+  printf 'x\n' >"$D/f.txt"
+  set +e
+  timeout --signal=TERM --kill-after=1 3 \
+    "$MUTAR" -cf "$D/a.tar" -g /dev/urandom --level=1 -C "$D" f.txt \
+    >"$D/out" 2>"$D/err"
+  rc=$?
+  set -e
+  if [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then
+    fail "R3-F3" "hung on -g /dev/urandom rc=$rc"
+  elif [ "$rc" -ge 128 ]; then
+    fail "R3-F3" "signaled rc=$rc err=$(head -c 160 "$D/err")"
+  else
+    pass "R3-F3: -g /dev/urandom --level=1 returns quickly (rc=$rc)"
   fi
 }
 

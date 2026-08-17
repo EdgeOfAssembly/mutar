@@ -172,6 +172,16 @@ static std::string unquote_name(std::string_view in) {
     return out;
 }
 
+/// Add @p n to @p acc. Returns false if @p n < 0 or the sum would overflow int64.
+[[nodiscard]] static bool add_i64_checked(std::int64_t& acc, std::int64_t n) {
+    if (n < 0)
+        return false;
+    if (acc > std::numeric_limits<std::int64_t>::max() - n)
+        return false;
+    acc += n;
+    return true;
+}
+
 /// Print MUTAR_SNAPSHOT_V2 field ranges (GNU-style layout).
 static void print_snapshot_field_ranges() {
     print("This mutar's snapshot file field ranges are\n"
@@ -2341,8 +2351,10 @@ public:
             // GNU LongName / LongLink
             if (e.typeflag == GNUTYPE_LONGNAME || e.typeflag == GNUTYPE_LONGLINK) {
                 std::string longstr;
+                // Oversized / short L/K is a hard error, not clean EOF
+                // (--delete / -u / -A must not treat this as end-of-archive).
                 if (!read_data_string(e.size, longstr))
-                    return {{}, false, true};
+                    return {{}, false, false};
                 // Strip trailing NUL
                 while (!longstr.empty() && longstr.back() == '\0') longstr.pop_back();
                 if (e.typeflag == GNUTYPE_LONGNAME) pending_longname = std::move(longstr);
@@ -2354,7 +2366,7 @@ public:
             if (e.typeflag == XHDTYPE || e.typeflag == XGLTYPE) {
                 std::string pax_data;
                 if (!read_data_string(e.size, pax_data))
-                    return {{}, false, true};
+                    return {{}, false, false};
                 auto parsed = pax_parse_filtered(pax_data);
                 if (e.typeflag == XGLTYPE) {
                     // Global header replaces prior archive-global map (GNU).
@@ -2639,10 +2651,15 @@ public:
                         std::int64_t off = std::stoll(tok);
                         if (!std::getline(ss, tok, ',')) break;
                         std::int64_t nb  = std::stoll(tok);
+                        if (off < 0 || nb < 0)
+                            throw std::out_of_range("GNU.sparse.map");
                         e.sparse_map.push_back({off, nb});
                     }
                     e.asize = 0;
-                    for (auto& sm : e.sparse_map) e.asize += sm.numbytes;
+                    for (auto& sm : e.sparse_map) {
+                        if (!add_i64_checked(e.asize, sm.numbytes))
+                            throw std::overflow_error("GNU.sparse.map asize");
+                    }
                 }
             } catch (const std::exception&) {
                 // Malformed numeric / sparse PAX field — skip this key only.
@@ -2683,9 +2700,18 @@ public:
             }
             isext = sp.isextended != 0;
         }
-        // asize = sum of numbytes
+        // asize = sum of numbytes (reject signed overflow; do not wrap)
         e.asize = 0;
-        for (auto& sm : e.sparse_map) e.asize += sm.numbytes;
+        for (auto& sm : e.sparse_map) {
+            if (sm.numbytes < 0 || !add_i64_checked(e.asize, sm.numbytes)) {
+                print(stderr, "mutar: sparse map archived size overflow\n");
+                failed_ = true;
+                e.sparse_map.clear();
+                e.is_sparse = false;
+                e.asize = (e.size > 0) ? e.size : 0;
+                return;
+            }
+        }
         e.is_sparse = true;
     }
 
@@ -4597,11 +4623,46 @@ static bool snap_unchanged(const SnapRec& rec, const struct stat& st,
     return true;
 }
 
+/// Max bytes for one snapshot text/NUL field. Rejects /dev/urandom-style garbage.
+static constexpr std::size_t k_max_snapshot_line = 64 * 1024;
+
+/// Read until @p delim, capped at @p max_len. Sets @p too_long if the cap is hit
+/// without a delimiter (caller must stop — do not keep scanning).
+static bool snap_bounded_getline(std::istream& in, std::string& out, char delim,
+                                 std::size_t max_len, bool* too_long = nullptr) {
+    out.clear();
+    if (too_long)
+        *too_long = false;
+    if (!in)
+        return false;
+    for (;;) {
+        int c = in.get();
+        if (c == EOF)
+            return !out.empty();
+        if (static_cast<char>(c) == delim)
+            return true;
+        if (out.size() >= max_len) {
+            if (too_long)
+                *too_long = true;
+            return false;
+        }
+        out.push_back(static_cast<char>(c));
+    }
+}
+
+static bool snap_text_is_binary(std::string_view s) {
+    for (unsigned char c : s) {
+        if (c == 0 || (c < 0x20 && c != '\t' && c != '\r'))
+            return true;
+    }
+    return false;
+}
+
 /// Read a NUL-terminated decimal integer from @p in. Returns false on EOF.
 static bool snap_read_num(std::istream& in, std::int64_t& out) {
     std::string tok;
-    std::getline(in, tok, '\0');
-    if (!in && tok.empty())
+    bool too_long = false;
+    if (!snap_bounded_getline(in, tok, '\0', 64, &too_long) || too_long)
         return false;
     if (tok.empty())
         return false;
@@ -4616,8 +4677,10 @@ static bool snap_read_num(std::istream& in, std::int64_t& out) {
 
 /// Read a NUL-terminated string from @p in.
 static bool snap_read_str(std::istream& in, std::string& out) {
-    std::getline(in, out, '\0');
-    return static_cast<bool>(in) || !out.empty();
+    bool too_long = false;
+    if (!snap_bounded_getline(in, out, '\0', k_max_snapshot_line, &too_long) || too_long)
+        return false;
+    return true;
 }
 
 /// Load GNU tar listed-incremental snapshot (format 0/1 text or 2 binary-NUL).
@@ -4714,12 +4777,26 @@ static bool load_gnu_snapshot(std::istream& in, const std::string& header,
 }
 
 /// Load mutar MUTAR_SNAPSHOT_V1/V2 text snapshot into @p snapshot_map.
-static void load_mutar_snapshot(std::istream& in,
+/// @return false on oversized line or binary garbage (caller treats as level 0).
+static bool load_mutar_snapshot(std::istream& in,
                                 std::map<std::string, SnapRec>& snapshot_map) {
     std::string line;
-    while (std::getline(in, line)) {
+    int bad_run = 0;
+    static constexpr int k_max_bad_run = 32;
+    bool too_long = false;
+    while (snap_bounded_getline(in, line, '\n', k_max_snapshot_line, &too_long)) {
+        if (snap_text_is_binary(line))
+            return false;
+        if (!line.empty() && line.back() == '\r')
+            line.pop_back();
+        if (line.empty())
+            continue;
         auto tab = line.find('\t');
-        if (tab == std::string::npos) continue;
+        if (tab == std::string::npos) {
+            if (++bad_run >= k_max_bad_run)
+                return !snapshot_map.empty();
+            continue;
+        }
         std::string sname = line.substr(0, tab);
         std::string rest  = line.substr(tab + 1);
         SnapRec rec{};
@@ -4727,8 +4804,11 @@ static void load_mutar_snapshot(std::istream& in,
         std::string smts = (tab2 == std::string::npos) ? rest : rest.substr(0, tab2);
         char* endp = nullptr; errno = 0;
         rec.mtime = std::strtoll(smts.c_str(), &endp, 10);
-        if (endp == smts.c_str() || (*endp != '\0' && *endp != '\t') || errno != 0)
+        if (endp == smts.c_str() || (*endp != '\0' && *endp != '\t') || errno != 0) {
+            if (++bad_run >= k_max_bad_run)
+                return !snapshot_map.empty();
             continue;
+        }
         if (tab2 != std::string::npos) {
             std::string sdev = rest.substr(tab2 + 1);
             char* dend = nullptr; errno = 0;
@@ -4738,8 +4818,12 @@ static void load_mutar_snapshot(std::istream& in,
                 rec.has_dev = true;
             }
         }
+        bad_run = 0;
         snapshot_map[sname] = rec;
     }
+    if (too_long)
+        return false;
+    return true;
 }
 
 /// Build GNU dumpdir body for directory at @p fspath (archive name @p archname).
@@ -5285,11 +5369,29 @@ static int op_create(const Config& cfg) {
     std::map<std::string, SnapRec> snapshot_map;
     bool do_incremental = !cfg.listed_incremental.empty() && cfg.level >= 1;
     if (do_incremental) {
+        struct stat snap_st{};
+        if (::stat(cfg.listed_incremental.c_str(), &snap_st) == 0 &&
+            !S_ISREG(snap_st.st_mode)) {
+            // /dev/urandom and other non-files: do not getline forever
+            print(stderr,
+                  "mutar: warning: snapshot '{}' is not a regular file; "
+                  "treating as level 0\n",
+                  cfg.listed_incremental);
+            do_incremental = false;
+        } else {
         std::ifstream snap_in(cfg.listed_incremental, std::ios::binary);
         if (snap_in) {
             std::string header;
-            std::getline(snap_in, header);
-            if (header.rfind("GNU tar-", 0) == 0) {
+            bool too_long = false;
+            const bool got_hdr = snap_bounded_getline(
+                snap_in, header, '\n', k_max_snapshot_line, &too_long);
+            if (too_long || (got_hdr && snap_text_is_binary(header))) {
+                print(stderr,
+                      "mutar: warning: snapshot '{}' is not a text snapshot; "
+                      "treating as level 0\n",
+                      cfg.listed_incremental);
+                do_incremental = false;
+            } else if (got_hdr && header.rfind("GNU tar-", 0) == 0) {
                 if (!load_gnu_snapshot(snap_in, header, snapshot_map)) {
                     print(stderr,
                           "mutar: warning: could not parse GNU snapshot '{}'; "
@@ -5297,17 +5399,30 @@ static int op_create(const Config& cfg) {
                           cfg.listed_incremental);
                     do_incremental = false;
                 }
-            } else if (header.rfind("MUTAR_SNAPSHOT", 0) == 0) {
-                load_mutar_snapshot(snap_in, snapshot_map);
+            } else if (got_hdr && header.rfind("MUTAR_SNAPSHOT", 0) == 0) {
+                if (!load_mutar_snapshot(snap_in, snapshot_map)) {
+                    print(stderr,
+                          "mutar: warning: could not parse snapshot '{}'; "
+                          "treating as level 0\n",
+                          cfg.listed_incremental);
+                    do_incremental = false;
+                }
             } else {
                 // Unknown / empty header: try mutar line format from start
                 snap_in.clear();
                 snap_in.seekg(0);
-                load_mutar_snapshot(snap_in, snapshot_map);
+                if (!load_mutar_snapshot(snap_in, snapshot_map)) {
+                    print(stderr,
+                          "mutar: warning: could not parse snapshot '{}'; "
+                          "treating as level 0\n",
+                          cfg.listed_incremental);
+                    do_incremental = false;
+                }
             }
         } else {
             // Snapshot file missing → archive all (treat as level 0)
             do_incremental = false;
+        }
         }
     }
     // Collect entries for snapshot write/update (files + directories + specials)
@@ -6704,11 +6819,18 @@ static int op_append(const Config& cfg) {
     if (cfg.pax_option_rules.any())
         reader.set_pax_rules(&cfg.pax_option_rules);
 
-    // Skip to end
+    // Skip to end. A failed L/g/x read is not clean EOF — do not clobber.
     for (;;) {
         auto [e, ok, eof] = reader.next_entry();
+        if (reader.failed()) {
+            print(stderr, "mutar: error reading archive\n");
+            return EXIT_FAILURE;
+        }
         if (eof || !ok) break;
-        reader.skip_entry(e);
+        if (!reader.skip_entry(e)) {
+            print(stderr, "mutar: error reading archive\n");
+            return EXIT_FAILURE;
+        }
     }
 
     // Seek back two blocks (the two EOF zero blocks) and overwrite
@@ -6765,9 +6887,16 @@ static int op_update(const Config& cfg) {
             reader.set_pax_rules(&cfg.pax_option_rules);
         for (;;) {
             auto [e, ok, eof] = reader.next_entry();
+            if (reader.failed()) {
+                print(stderr, "mutar: error reading archive\n");
+                return EXIT_FAILURE;
+            }
             if (eof || !ok) break;
             archive_mtimes[e.name] = e.mtime;
-            reader.skip_entry(e);
+            if (!reader.skip_entry(e)) {
+                print(stderr, "mutar: error reading archive\n");
+                return EXIT_FAILURE;
+            }
         }
     }
 
@@ -6844,6 +6973,11 @@ static int op_delete(const Config& cfg) {
 
         for (;;) {
             auto [e, ok, eof] = reader.next_entry();
+            if (reader.failed()) {
+                print(stderr, "mutar: error reading archive\n");
+                ::unlink(tmpfile.c_str());
+                return EXIT_FAILURE;
+            }
             if (eof) break;
             if (!ok) { ::unlink(tmpfile.c_str()); return EXIT_FAILURE; }
 
@@ -6938,8 +7072,15 @@ static int op_cat(const Config& cfg) {
     dummy.set_warn_config(&cfg);
         for (;;) {
             auto [e, ok, eof] = dummy.next_entry();
+            if (dummy.failed()) {
+                print(stderr, "mutar: error reading archive\n");
+                return EXIT_FAILURE;
+            }
             if (eof || !ok) break;
-            dummy.skip_entry(e);
+            if (!dummy.skip_entry(e)) {
+                print(stderr, "mutar: error reading archive\n");
+                return EXIT_FAILURE;
+            }
         }
         off_t pos = (dummy.block_no() - 2) * static_cast<off_t>(BLOCKSIZE);
         if (pos < 0) pos = 0;
