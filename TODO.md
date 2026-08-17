@@ -83,6 +83,14 @@ These are **real** GNU mismatches / polish, not crashes. Targeted FIXUP series, 
 **Suggested branch:** `exp/archive-delta`  
 Sketch CLI (names TBD): `--delta-from=BASE` on create; `--apply-delta=DELTA` onto a base. Measure size vs full B and vs `xdelta3` on the two tars.
 
+**Mandatory if we ever test this:** checksum verification end-to-end — not optional.
+
+1. Hash **base** and **new** trees/archives (e.g. sorted `find … -print0 | xargs -0 sha256sum`, plus archive SHA-256).
+2. Apply delta(s) in order onto a copy of the base.
+3. Hash the reconstructed result; **must match** the new tree/archive bit-for-bit (file count, sizes, contents).
+4. Fail the experiment if any checksum mismatches — size wins do not count without this.
+5. For a version chain (`1.0` + Δ`1.5` + Δ`1.8` + Δ`2.0`), verify after **each** apply, not only at the end.
+
 ---
 
 ## Still deferred (not scheduled)
