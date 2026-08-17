@@ -15,7 +15,13 @@ CBMC    ?= $(shell c=$$(command -v cbmc 2>/dev/null); \
 CC      ?= gcc
 CFLAGS  ?= -std=c23 -Wall -Wextra -O1 -Iformal
 
-.PHONY: test tests verify formal-agreement formal-cbmc formal-clean
+# Profile build: -O3 + -pg + -fno-inline (gprof). See gnu-make skill.
+PROFILE_DIR ?= build-profile
+CXXFLAGS_PROFILE := -std=c++23 -O3 -DNDEBUG -g -pg -fno-inline \
+	-march=x86-64 -mtune=generic -fno-omit-frame-pointer
+LDFLAGS_PROFILE  := -pg
+
+.PHONY: test tests verify formal-agreement formal-cbmc formal-clean profile release
 
 # ── Unit / integration tests (CTest) ──────────────────────────────────────────
 test tests:
@@ -66,3 +72,24 @@ verify: test formal-agreement
 
 formal-clean:
 	rm -f formal/path_agreement_test
+
+# ── Profile (gprof) ───────────────────────────────────────────────────────────
+# Usage: make -s -j$(nproc) profile
+# Then run build-profile/mutar … ; gprof build-profile/mutar gmon.out
+profile:
+	cmake -S . -B $(PROFILE_DIR) \
+	  -DCMAKE_BUILD_TYPE=Release \
+	  -DCMAKE_CXX_FLAGS="$(CXXFLAGS_PROFILE)" \
+	  -DCMAKE_EXE_LINKER_FLAGS="$(LDFLAGS_PROFILE)" \
+	  -DCMAKE_C_FLAGS="$(CXXFLAGS_PROFILE)"
+	cmake --build $(PROFILE_DIR) -j$$(nproc 2>/dev/null || echo 1)
+	@echo "Profile binary: $(PROFILE_DIR)/mutar  (run it, then: gprof $(PROFILE_DIR)/mutar gmon.out)"
+
+# ── Release (no -pg) ──────────────────────────────────────────────────────────
+release:
+	cmake -S . -B build-release \
+	  -DCMAKE_BUILD_TYPE=Release \
+	  -DCMAKE_CXX_FLAGS="-std=c++23 -O3 -DNDEBUG -march=x86-64 -mtune=generic" \
+	  -DCMAKE_EXE_LINKER_FLAGS=""
+	cmake --build build-release -j$$(nproc 2>/dev/null || echo 1)
+	@echo "Release binary: build-release/mutar"

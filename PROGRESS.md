@@ -333,3 +333,15 @@ mutar_phase8_residuals_tests, mutar_bench_smoke, mutar_boundary_tests.
 ### Tag
 
 `v0.3.0` — GOAL_GNU_PARITY freeze: GNU tar 1.35 CLI parity except SELinux.
+
+
+## Performance — write_regular buffered I/O (2026-08-17)
+
+Profile: `make profile` (`-O3 -pg -fno-inline`). Corpus: `/usr/src/linux` (1.7G, ~95k files).
+
+| Op | Baseline | After `write_bytes` 64KiB | 
+|----|----------|---------------------------|
+| create `-cf` | 27.911 s | **3.964 s** (7.0×) |
+| list `-tf` | 1.639 s | 1.578 s |
+
+Archive bytes identical (`cmp`). Checkpoint `checkpoint/20260817T004023Z-perf`. Commit `ee23406`.
