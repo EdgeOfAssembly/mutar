@@ -1223,6 +1223,33 @@ public:
         block_no_++;
     }
 
+    /// Copy @p n bytes into the record buffer, flushing full records.
+    /// @p n need not be 512-aligned; a trailing partial block is zero-padded
+    /// and counted the same as write_block.
+    /// @pre pos_ is a multiple of BLOCKSIZE (write_block / write_bytes invariant).
+    void write_bytes(ArchiveStream& s, const char* p, std::size_t n) {
+        if (n == 0)
+            return;
+        const std::size_t total = n;
+        while (n > 0) {
+            if (pos_ >= record_size_)
+                flush(s);
+            const std::size_t space = record_size_ - pos_;
+            const std::size_t chunk = std::min(n, space);
+            std::memcpy(buf_.data() + pos_, p, chunk);
+            pos_ += chunk;
+            p    += chunk;
+            n    -= chunk;
+        }
+        const std::size_t rem = pos_ % BLOCKSIZE;
+        if (rem != 0) {
+            const std::size_t pad = BLOCKSIZE - rem;
+            std::memset(buf_.data() + pos_, 0, pad);
+            pos_ += pad;
+        }
+        block_no_ += static_cast<std::int64_t>((total + BLOCKSIZE - 1) / BLOCKSIZE);
+    }
+
     void flush(ArchiveStream& s) {
         if (pos_ == 0) return;
         // Pad record to full record size
@@ -3105,7 +3132,8 @@ private:
 
         std::int64_t remaining   = e.size;
         std::int64_t file_offset = 0; // bytes successfully archived so far
-        char blkbuf[BLOCKSIZE];
+        if (dump_io_buf_.size() < k_dump_io_size)
+            dump_io_buf_.resize(k_dump_io_size);
         bool io_error = false;
         while (remaining > 0 && !io_error) {
             // Mid-file multi-volume: volume full → flush, rotate, write 'M' header.
@@ -3124,19 +3152,28 @@ private:
                 buf_.write_block(*stream_, cblk);
             }
 
-            std::int64_t to_read = std::min(remaining, static_cast<std::int64_t>(BLOCKSIZE));
-            std::memset(blkbuf, 0, BLOCKSIZE);
+            std::int64_t to_read = std::min(remaining,
+                                            static_cast<std::int64_t>(k_dump_io_size));
+            if (max_blocks_ > 0) {
+                const std::int64_t blocks_left = max_blocks_ - buf_.block_no();
+                if (blocks_left <= 0)
+                    continue; // rotate above; avoid writing past tape end
+                const std::int64_t vol_bytes =
+                    blocks_left * static_cast<std::int64_t>(BLOCKSIZE);
+                to_read = std::min(to_read, vol_bytes);
+            }
+
             ssize_t got = 0;
             while (got < to_read) {
-                ssize_t n = ::read(fd, blkbuf + got, static_cast<std::size_t>(to_read - got));
+                ssize_t n = ::read(fd, dump_io_buf_.data() + got,
+                                   static_cast<std::size_t>(to_read - got));
                 if (n < 0) { if (errno == EINTR) continue; io_error = true; break; }
                 if (n == 0) { io_error = true; break; }  // EOF before expected size
                 got += n;
             }
-            if (!io_error || got > 0) {
-                Block b{};
-                std::memcpy(b.buffer, blkbuf, BLOCKSIZE);
-                buf_.write_block(*stream_, b);
+            if (got > 0) {
+                buf_.write_bytes(*stream_, dump_io_buf_.data(),
+                                 static_cast<std::size_t>(got));
                 remaining   -= got;
                 file_offset += got;
             }
@@ -3411,6 +3448,8 @@ private:
     std::size_t    global_header_count_ = 0;  // for globexthdr.name %n
     std::int64_t   max_blocks_ = 0;           // multi-volume tape capacity (0 = off)
     std::function<bool(bool mid_member)> rotate_;
+    static constexpr std::size_t k_dump_io_size = 65536;
+    std::vector<char> dump_io_buf_;           // reused write_regular read buffer
 };
 
 // ── Path utilities ────────────────────────────────────────────────────────────
